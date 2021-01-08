@@ -1,0 +1,4 @@
+*.DS_store
+chronos.egg-info
+*.pyc
+*.ipynb_checkpoints
