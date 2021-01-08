@@ -77,7 +77,7 @@ def get_adjusted_matrix(shifts, gene_effect,):
 		index=ge.index
 	).reset_index()
 
-	adjusted = pd.pivot(adjusted, index="level_0", columns="level_1")[0]
+	adjusted = adjusted.pivot(index="level_0", columns="level_1")[0]
 	adjusted.index.name = "cell_line_name"
 	adjusted.columns.name = "gene"
 	return adjusted
