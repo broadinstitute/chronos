@@ -293,7 +293,6 @@ class Chronos(object):
 	default_timepoint_scale = .1 * np.log(2)
 	default_cost_value = 0.67
 	persistent_handles = set([])
-	horseshoe_fuzz = 1e-6
 	def __init__(self, 
 				 readcounts,
 				 #copy_number_matrix,
@@ -845,7 +844,9 @@ class Chronos(object):
 		v_mean_effect = tf.Variable(np.random.uniform(-.0001, .00005, size=(1, self.ngenes)), name='GE_mean', dtype=dtype)
 		v_residue = tf.Variable(gene_effect_est, dtype=dtype, name='GE_deviation') 
 		_residue = v_residue * self._gene_effect_mask
-		_true_residue =  _residue
+		_true_residue =  (
+				v_residue - (tf.reduce_sum(v_residue, axis=0)/tf.reduce_sum(self._gene_effect_mask, axis=0) )[tf.newaxis, :]
+			) * self._gene_effect_mask
 		_combined_gene_effect = v_mean_effect + _true_residue
 		tf.summary.histogram("mean_gene_effect", v_mean_effect)
 		print("built core gene effect: %i cell lines by %i genes" %tuple(_combined_gene_effect.get_shape().as_list()))
@@ -957,7 +958,7 @@ class Chronos(object):
 
 		#guarantee that the "dummy" guide will never be the second most effective guide for any gene
 		fixed_adjust_np = np.zeros(self.nguides+1, dtype=self.np_dtype)
-		fixed_adjust_np[-1] = 1e7
+		fixed_adjust_np[-1] = 1e6
 		_guide_reg_base = 1.0 / _guide_efficacy[0] + tf.constant(fixed_adjust_np, dtype=dtype)
 		lists = []
 		for key in self.keys:
@@ -1048,12 +1049,8 @@ class Chronos(object):
 		print("building other regularizations")
 		with tf.name_scope('full_cost'):
 			self._L1_penalty = self.gene_effect_L1 * tf.square(tf.reduce_sum(self._combined_gene_effect)/self.mask_count) 
-			self._L2_penalty = -self.gene_effect_L2 * tf.log(
-					tf.reduce_mean(tf.log( 1 + 2.0 / (self.v_mean_effect**2 + self.horseshoe_fuzz) ))
-				)
-			self._hier_penalty = -self.gene_effect_hierarchical * tf.log(
-				tf.reduce_sum(tf.log( 1 + 2.0 / (self._true_residue**2 + self.horseshoe_fuzz) ))/self.mask_count
-				)
+			self._L2_penalty = self.gene_effect_L2 * tf.reduce_sum(tf.square(self._combined_gene_effect))/self.mask_count
+			self._hier_penalty = self.gene_effect_hierarchical * tf.reduce_sum(tf.square(self._true_residue))/self.mask_count
 			self._growth_reg_cost = -self.growth_rate_reg * 1.0/len(self.keys) * tf.add_n([
 													tf.reduce_mean( tf.log(tf.boolean_mask(v, self._line_presence_boolean[key])) )
 													for key, v in self._growth_rate.items()
