@@ -251,7 +251,7 @@ class Chronos(object):
 	Notes on attribute names:
 
 	Attributes with single preceding underscores are tensorflow constants or tensorflow nodes, in analogy 
-	with the idea of "private" attributes not mean to be interacted with directly. For tensorflow nodes,
+	with the idea of "private" attributes not meant to be interacted with directly. For tensorflow nodes,
 	there is usually a defined class attribute with no underscore which runs the node and returns
 	a pandas Series or DataFrame or dict of the same. 
 
@@ -335,7 +335,7 @@ class Chronos(object):
 			gene_effect_hierarchical (`float`): regularization of individual gene effect scores towards the mean across cell lines
 			gene_effect_smoothing (`float`): regularization of individual gene scores towards mean after Gaussian kernel convolution
 			kernel_width (`float`): width (SD) of the Gaussian kernel for the smoothing regularization
-			gene_effect_L1 (`float`): regularization of gene effect mean towards zero with L1 penalty
+			gene_effect_L1 (`float`): regularization of gene effect CELL LINE MEAN towards zero with L1 penalty
 			gene_effect_L2 (`float`): regularization of individual gene scores towards zero with L2 penalty
 			offset_reg (`float`): regularization of pDNA error
 			growth_rate_reg (`float`): regularization of the negative log of the relative growth rate
@@ -1193,10 +1193,6 @@ class Chronos(object):
 
 
 	def step(self, ge_only=False):
-		'''run the AdamOptimizer to optimize all parameters simultaneously.
-		If used, don't use step_one_variable! ADAM is not Markovian and will
-		not behave well if the gradient changes discontinously between its steps.
-		'''
 		if ge_only:
 			self.sess.run(self._ge_only_step, self.run_dict)
 		else:
@@ -1416,11 +1412,6 @@ class Chronos(object):
 			index=self.index_map[key], columns=self.column_map[key]
 			) for key in self.keys}
 
-	# @property
-	# def timepoints(self):
-	# 	return {key: pd.DataFrame(self.sess.run(self._timepoints[key], self.run_dict),
-	# 		index=self.index_map[key], columns=self.column_map[key]
-	# 		) for key in self.keys}
 
 	@property
 	def rpm(self):
@@ -1434,284 +1425,4 @@ class Chronos(object):
 	@learning_rate.setter
 	def learning_rate(self, desired_learning_rate):
 		self.run_dict[self._learning_rate] = desired_learning_rate
-
-
-
-##################################################################
-#               T  E  S  T  I  N  G                              #
-##################################################################
-
-
-def approx_equal(a, b, tol):
-	diff = 2 * np.abs(a - b)/(np.abs(a) + np.abs(b) + tol**2)
-	return np.max(diff) < tol
-
-def assert_approx_equal(a, b, tol=1e-6):
-	assert approx_equal(np.array(a), np.array(b), tol),\
-	'Failure!\nexpected:\n%r\n\nreceived\n%r' %(b, a)
-
-def deterministic_test():
-	sequences = ['Line1_RepA', 'Line1_RepB', 'Line2_RepA', 'Line2_RepB', 'pDNA_1RepA', 'pDNA_1RepB', 'pDNA_2RepA']
-	sgrna = ['Gene1_GuideA', 'Gene1_GuideB', 'Gene2_GuideA', 'Gene2_GuideB', 'Gene3_GuideA', 'Gene3_GuideB']
-	pDNA_batch = ["0", "0", "1", "1", "0", "0", "1"]
-	days = np.array([4, 8, 6, 6, 0, 0, 0], dtype=np.float64)
-
-	readcounts = pd.DataFrame(np.array([
-		[50, 75, 100, 100, 50, 100],
-		[25, 50, 200, 200, 100, 200],
-		[100, 40, 35, 100, 100, 200],
-		[100, 30, 40, 100, 100, 200],
-		#pDNA
-		[150, 150, 100, 100, 50, 150],
-		[50, 50, 100, 100, 50, 50],
-		[100, 35, 100, 100, 100, 200]
-		]), 
-		index=sequences,
-		columns=sgrna
-	)
-	sequence_map = pd.DataFrame({
-		'sequence_ID': sequences,
-		'cell_line_name': [s.split("_")[0] for s in sequences],
-		"pDNA_batch": pDNA_batch,
-		"days": days
-		})
-	guide_gene_map = pd.DataFrame({
-		"sgrna": sgrna,
-		"gene": [s.split('_')[0] for s in sgrna]
-		})
-
-	model = Chronos(
-		readcounts = {"test": readcounts},
-		sequence_map = {"test": sequence_map},
-		guide_gene_map = {"test": guide_gene_map},
-		initial_screen_delay=0
-		)
-
-	print("checking initial timepoint")
-	initial = np.array([
-			[2./11, 2./11, 2./11, 2./11, 1./11, 2./11],
-			[2./11, 2./11, 2./11, 2./11, 1./11, 2./11],
-			[1./6.35, .35/6.35, 1./6.35, 1./6.35, 1./6.35, 2./6.35],
-			[1./6.35, .35/6.35, 1./6.35, 1./6.35, 1./6.35, 2./6.35]
-		])
-	assert_approx_equal(model.initial['test'], initial)
-
-	print("checking later timepoints")
-	assert_approx_equal(model.timepoints['test'], readcounts.loc[model.all_sequences])
-
-	print("checking normalized later timepoints")
-	readcounts_normed = np.log((readcounts.iloc[:4]+1e-16).divide((readcounts.iloc[:4]+1e-16).sum(axis=1), axis=0))
-	assert_approx_equal(model.timepointsnorm['test'], readcounts_normed)
-
-	print("checking assignment of guide efficacy")
-	guide_efficacy = pd.Series(dict(zip(sgrna, [.25, .75, .5, .5, .1, .9])))
-	model.guide_efficacy = guide_efficacy
-	assert_approx_equal(model.guide_efficacy, guide_efficacy)
-
-	print("checking assignment of cell efficacy")
-	cell_efficacy = pd.Series(dict(zip(['Line1', 'Line2'], [.4, .6])))
-	model.cell_efficacy = cell_efficacy
-	assert_approx_equal(model.cell_efficacy, cell_efficacy)
-
-	print("checking assignment of gene effect scale")
-	growth_rate = pd.Series(dict(zip(['Line1', 'Line2'], [1.0, 2.0])))
-	model.growth_rate = growth_rate
-	assert_approx_equal(model.growth_rate, growth_rate/1.5)
-
-	print("checking assignment of gene effect")
-	gene_effect = pd.DataFrame([
-		[-.5, .5, 0],
-		[.5, 0, -.2]
-	], index=["Line1", "Line2"], columns=["Gene1", "Gene2", "Gene3"])
-	model.gene_effect = gene_effect
-	assert_approx_equal(model.gene_effect, gene_effect)
-
-	print("checking model's expanded gene effect")
-	gene_effect_expanded = gene_effect.multiply(growth_rate/1.5, axis=0).loc[
-		['Line1', 'Line1', 'Line2', 'Line2'],
-		['Gene1', 'Gene1', 'Gene2', 'Gene2', 'Gene3', 'Gene3']
-	]
-	gene_effect_expanded.index = sequences[:4]
-	gene_effect_expanded.columns = sgrna
-	assert_approx_equal(
-		Chronos.default_timepoint_scale * pd.DataFrame(model.sess.run(model._gene_effect['test'], model.run_dict),
-			index=sequences[:4], columns=sgrna
-		),
-		gene_effect_expanded
-	)
-
-	print("checking model's growth estimate")
-	edays = gene_effect_expanded.multiply(days[:4], axis=0)
-	growth = np.exp(edays)
-	assert_approx_equal(
-		pd.DataFrame(model.sess.run(model._growth['test'], model.run_dict),
-			index=sequences[:4], columns=sgrna
-		),
-		growth
-	)
-
-	print("checking model's efficacy estimate")
-	efficacy = np.outer(cell_efficacy, guide_efficacy)
-	assert_approx_equal(model.efficacy, efficacy)
-
-	print("checking model's readcount estimate")
-	efficacy_expanded = pd.DataFrame(efficacy[[0, 0, 1, 1]], index=sequences[:4], columns=sgrna)
-	adjusted_growth = 1 + efficacy_expanded * (growth-1)
-	out = initial * adjusted_growth
-	assert_approx_equal(model.out['test'], out)
-
-	print("checking model's expanded gene mean effect")
-	ge2 = pd.DataFrame(index=gene_effect.index, columns=gene_effect.columns)
-	for c in ge2.columns:
-		ge2.loc[:, c] = gene_effect[c].mean()
-	ge2_expanded = ge2.multiply(growth_rate/1.5, axis=0).loc[
-		['Line1', 'Line1', 'Line2', 'Line2'],
-		['Gene1', 'Gene1', 'Gene2', 'Gene2', 'Gene3', 'Gene3']
-	]
-	ge2_expanded.index = sequences[:4]
-	ge2_expanded.columns = sgrna
-	assert_approx_equal(
-		Chronos.default_timepoint_scale * pd.DataFrame(model.sess.run(model._mean_effect_expanded['test'], model.run_dict),
-			index=sequences[:4], columns=sgrna
-		),
-		ge2_expanded
-	)
-
-	print("checking model's gene_mean based growth estimate")
-	edays2 = ge2_expanded.multiply(days[:4], axis=0)
-	growth2 = np.exp(edays2)
-	assert_approx_equal(
-		pd.DataFrame(model.sess.run(model._growth_mean['test'], model.run_dict),
-			index=sequences[:4], columns=sgrna
-		),
-		growth2
-	)
-
-	print("checking model's gene_mean based readcount estimate")
-	adjusted_growth2 = 1 + efficacy_expanded * (growth2-1)
-	out2 = initial * adjusted_growth2
-	assert_approx_equal(
-		pd.DataFrame(model.sess.run(model._out_mean['test'], model.run_dict),
-			index=out2.index, columns=out2.columns),
-		out2)
-
-	out_normalized = out.divide(out.sum(axis=1), axis=0)
-	print("checking cost without regularization")
-	cost = -np.mean(np.mean(
-		readcounts * (np.log(out_normalized) - readcounts_normed)
-		))
-	assert_approx_equal(model.cost, cost)
-	print("cost is %f" %cost)
-
-	out_normalized2 = out2.divide(out2.sum(axis=1), axis=0)
-	print("checking mean gene effect-based cost")
-	cost2 = -np.mean(np.mean(
-		readcounts * (np.log(out_normalized2) - readcounts_normed)
-		))
-	assert_approx_equal(model.sess.run(model._total_efficacy_cost, model.run_dict), cost2)
-	print("mean-based cost is %f" %cost2)
-
-	print("all deterministic tests passed")
-
-
-def stochastic_test():
-	print("\nchecking simulated data\n")
-	genes = ["Gn%i" %i for i in range(10)]
-	guides = [g + "_Gd%i" %i for g in genes for i in range(4)]
-	cells = ["Ln%i" %i for i in range(4)]
-	sequences = [c + "_Sq%i" %i for c in cells for i in range(3)]
-
-	pDNA_batch = np.random.randint(0, 3, size=len(cells))
-	if len(pd.unique(pDNA_batch)) < 2:
-		pDNA_batch[0] = (pDNA_batch[1] + 1) % 4
-	pDNA_batch_sequence = pDNA_batch[np.ravel([[i]*3 for i in range(len(cells))])]
-	pDNAs = ['pD%i' %i for i in range(6)]
-	ppDNA_batch = np.random.choice(pd.unique(pDNA_batch), size=len(pDNAs))
-	batch_reads = pd.DataFrame(np.random.randint(300, 3000, size=(len(pd.unique(pDNA_batch)), len(guides))), 
-							index=pd.unique(pDNA_batch), columns=guides)
-	pDNA_reads = batch_reads.loc[ppDNA_batch] + np.random.randint(-9, 10, size=(len(pDNAs), len(guides)))
-	pDNA_reads.index = pDNAs
-
-	gene_effects = pd.DataFrame(0, index=cells, columns=genes)
-	gene_effects.iloc[:, [0, 1]] = -1
-	#gene_effects.loc[:, genes[-2]] = .05
-	gene_effects.iloc[:, 2] = [-.8] + [0]*(len(gene_effects)-1)
-	gene_effects.iloc[:, 3] = [0] + [-.8] + [0]*(len(gene_effects)-2)
-
-	cell_efficacy = pd.Series(np.random.uniform(.2, 1, size=len(cells)), index=cells)
-	guide_efficacy = pd.Series(np.random.choice(
-		[1, .9, .8, .8, .7, .7, .7, .6, .6, .6, .5, .5, .4, .3, .2, .1],
-		 size=len(guides)), index=guides)
-	efficacy = pd.DataFrame(cell_efficacy.values.reshape((-1, 1)).dot(guide_efficacy.values.reshape((1, -1))),
-							index=cells, columns=guides)
-
-	days = [4, 8, 12] * len(cells)
-
-	sequence_map = pd.DataFrame({'sequence_ID': sequences, 'cell_line_name': [s.split('_')[0] for s in sequences],
-	 							'pDNA_batch': pDNA_batch_sequence,'days': days})
-	sequence_map = pd.concat([sequence_map, 
-					pd.DataFrame({'sequence_ID': pDNAs, 'cell_line_name': 'pDNA', 'pDNA_batch': ppDNA_batch, 'days': 0}),
-					], ignore_index=True).set_index('sequence_ID')
-	guide_gene_map = pd.DataFrame({'sgrna': guides, 'gene': [s.split('_')[0] for s in guides]})
-
-	efficacy_expanded = efficacy.loc[sequence_map.loc[sequences, 'cell_line_name'].values]
-	efficacy_expanded.index = sequences
-	gene_effect_expanded = gene_effects.loc[sequence_map.loc[sequences, 'cell_line_name'].values, guide_gene_map.gene.values]
-	gene_effect_expanded.index = sequences
-	gene_effect_expanded.columns = guides
-	pDNA_expanded = pDNA_reads.groupby(ppDNA_batch).median().loc[pDNA_batch
-		].set_index(pd.Index(cells)).loc[sequence_map.loc[sequences].cell_line_name].set_index(pd.Index(sequences))
-	#pDNA_expanded += np.random.randint(-4, 5, size=pDNA_expanded.shape)
-
-	growth = np.exp(gene_effect_expanded.multiply(sequence_map.loc[sequences].days.values, axis=0))
-	adjusted_growth = efficacy_expanded * growth + (1 - efficacy_expanded)
-	try:
-		readcounts = np.round(pDNA_expanded * adjusted_growth).astype(np.int)
-	except ValueError:
-		print(pDNA_expanded.isnull().sum().sum())
-		print(pDNA_expanded)
-		assert False
-	full_readcounts = pd.concat([readcounts, pDNA_reads])
-	#full_readcounts += np.random.randint(-50, 51, size=full_readcounts.shape)
-
-	# print('\ncell_efficacy\n', cell_efficacy)
-	# print('\nguide_efficacy\n', guide_efficacy)
-	# print('\ndays\n', days)
-	# print('\n')
-	print('\npDNA readcounts\n', pDNA_reads)
-	# print('\nefficacy expanded\n', efficacy_expanded)
-	# print('\ngene effect expanded\n', gene_effect_expanded)
-	# print('\ngrowth\n', growth)
-	print('\nfinal readcounts\n', readcounts)
-	# print('\n')
-	# print('\nfull readcounts\n', full_readcounts)
-	print('\nsequence map\n', sequence_map)
-	# print('\nguide gene map\n', guide_gene_map)
-
-	print('\nbuilding model\n')
-	model = Chronos(readcounts={'test': full_readcounts},
-					sequence_map={'test': sequence_map.reset_index()},
-					guide_gene_map={'test': guide_gene_map})
-	print('cost: %f' %model.cost)
-	for i in range(10):
-		for j in range(400):
-			model.step()
-		print(model.cost)
-
-	print("\nactual gene_effects\n", gene_effects)
-	model_ge = model.gene_effect
-	model_ge = model_ge.subtract(model_ge.iloc[:, [-2, -1]].median(axis=1), axis=0)
-	model_ge = model_ge.divide(model_ge.iloc[:, [0, 1]].median(axis=1).abs(), axis=0)
-	print("\nmodel gene_effects (rescaled)\n", np.round(model_ge, 2))
-	print('\ncell efficacy\n', pd.DataFrame({"model estimate": model.cell_efficacy, "actual": cell_efficacy}))
-	print('\nguide efficacy\n', pd.DataFrame({"model estimate": model.guide_efficacy, "actual": guide_efficacy}))
-
-	print('\nactual normalized readcounts\n', 
-		full_readcounts.loc[sequences].divide(full_readcounts.loc[sequences].sum(axis=1), axis=0))
-	print("\nmodel estimate of final normalized readcounts\n", 
-		model.out['test'].divide(model.out['test'].sum(axis=1), axis=0))
-	print('\nactual normalized readcounts\n', 
-		full_readcounts.loc[sequences].divide(full_readcounts.loc[sequences].sum(axis=1), axis=0))
-
-	return model
 
