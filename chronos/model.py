@@ -1213,7 +1213,7 @@ class Chronos(object):
 
 			self.step(ge_only=self.epoch < ge_only)
 
-			if not i%50:
+			if not i%report_freq:
 				delta = time() - start_time
 				completed = i+1 - start_epoch
 				to_go = nepochs - completed

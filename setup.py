@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='chronos',
-    version='0.1',
+    version='0.1.1',
     author="Joshua Dempster",
     description="Time series modeling of CRISPR KO readcounts",
     packages=find_packages(),
