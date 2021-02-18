@@ -1,0 +1,21 @@
+TensorFlow 2.0 Upgrade Script
+-----------------------------
+Converted 1 files
+Detected 0 issues that require attention
+--------------------------------------------------------------------------------
+================================================================================
+Detailed log follows:
+
+================================================================================
+--------------------------------------------------------------------------------
+Processing file 'copy_correction.py'
+ outputting to 'copy_correction_v2.py'
+--------------------------------------------------------------------------------
+
+49:16: INFO: Added keywords to args of function 'tf.reduce_mean'
+52:9: INFO: Added keywords to args of function 'tf.reduce_mean'
+53:13: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+56:8: INFO: Renamed 'tf.Session' to 'tf.compat.v1.Session'
+57:10: INFO: Renamed 'tf.global_variables_initializer' to 'tf.compat.v1.global_variables_initializer'
+--------------------------------------------------------------------------------
+

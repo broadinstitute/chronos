@@ -9,6 +9,9 @@ from time import time
 from datetime import timedelta
 import h5py
 
+
+tf.compat.v1.disable_eager_execution()
+
 '''
 CHRONOS: population modeling of CRISPR readcount data
 Joshua Dempster (dempster@broadinstitute.org)
@@ -471,7 +474,7 @@ class Chronos(object):
 		#########################    F  I  N  A  L  I  Z  I  N  G    ###################################
 
 		print('\nCreating optimizer')		
-		self.optimizer = tf.train.AdamOptimizer(learning_rate=self._learning_rate)
+		self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=self._learning_rate)
 
 		default_var_list = [
 				self.v_mean_effect,
@@ -486,7 +489,7 @@ class Chronos(object):
 
 		self._ge_only_step = self.optimizer.minimize(self._full_cost, var_list=[self.v_mean_effect, self.v_residue])
 		self._step = self.optimizer.minimize(self._full_cost, var_list=default_var_list)
-		self._merged = tf.summary.merge_all()
+		self._merged = tf.compat.v1.summary.merge_all()
 
 		if log_dir is not None:
 			print("\tcreating log at %s" %log_dir)
@@ -494,9 +497,9 @@ class Chronos(object):
 				shutil.rmtree(log_dir)
 			os.mkdir(log_dir)
 			self.log_dir = log_dir
-			self.writer = tf.summary.FileWriter(log_dir, self.sess.graph)
+			self.writer = tf.compat.v1.summary.FileWriter(log_dir, self.sess.graph)
 		
-		init_op = tf.global_variables_initializer()
+		init_op = tf.compat.v1.global_variables_initializer()
 		print('initializing variables')
 		self.sess.run(init_op)
 
@@ -524,15 +527,15 @@ class Chronos(object):
 
 
 	def get_persistent_input(self, dtype, data, name=''):
-		placeholder = tf.placeholder(dtype=dtype, shape=data.shape)
+		placeholder = tf.compat.v1.placeholder(dtype=dtype, shape=data.shape)
 		# Persistent tensor to hold the data in tensorflow. Helpful because TF doesn't allow 
 		# graph definitions larger than 2GB (so can't use constants), and passing the feed dict each time is slow.
 		# This feature is poorly documented, but the handle seems to refer not to a tensor but rather a tensor "state" -
 		# the state of a placeholder that's been passed the feed dict. This is what persists. Annoyingly, it then becomes
 		# impossible to track the shape of the tensor.
-		state_handle = self.sess.run(tf.get_session_handle(placeholder), {placeholder: data})
+		state_handle = self.sess.run(tf.compat.v1.get_session_handle(placeholder), {placeholder: data})
 		# why TF's persistence requires two handles, I don't know. But it does.
-		tensor_handle, data = tf.get_session_tensor(state_handle.handle, dtype=dtype, name=name)
+		tensor_handle, data = tf.compat.v1.get_session_tensor(state_handle.handle, dtype=dtype, name=name)
 		self.run_dict[tensor_handle] = state_handle.handle
 		self.persistent_handles.add(state_handle.handle)
 		return data
@@ -670,8 +673,8 @@ class Chronos(object):
 
 	def _initialize_graph(self, max_learning_rate, dtype):
 		print('initializing graph')
-		self.sess = tf.Session()
-		self._learning_rate = tf.placeholder(shape=tuple(), dtype=dtype)
+		self.sess = tf.compat.v1.Session()
+		self._learning_rate = tf.compat.v1.placeholder(shape=tuple(), dtype=dtype)
 		self.run_dict = {self._learning_rate: max_learning_rate}
 		self.max_learning_rate = max_learning_rate
 		self.persistent_handles = set([])
@@ -755,10 +758,10 @@ class Chronos(object):
 		for key in self.keys:
 			initial_normed = self.sess.run(self._measured_initial[key], self.run_dict)
 			v_initial[key] = tf.Variable(np.zeros((initial_normed.shape[1], 1), dtype=self.np_dtype), dtype=dtype, name='initial_%s' % key)
-			_initial_offset[key] = tf.exp(v_initial[key] - tf.reduce_mean(v_initial[key]))
+			_initial_offset[key] = tf.exp(v_initial[key] - tf.reduce_mean(input_tensor=v_initial[key]))
 
 
-			_grouped_initial_offset[key] = tf.transpose(tf.math.unsorted_segment_mean(
+			_grouped_initial_offset[key] = tf.transpose(a=tf.math.unsorted_segment_mean(
 					_initial_offset[key],
 					self.guide_map[key]['gather_ind_inner'],
 					num_segments=self.ngenes,
@@ -766,11 +769,11 @@ class Chronos(object):
 			))
 
 			_initial_core[key] = self._measured_initial[key] *\
-				tf.exp(tf.transpose(_initial_offset[key]) - tf.gather(_grouped_initial_offset[key], 
+				tf.exp(tf.transpose(a=_initial_offset[key]) - tf.gather(_grouped_initial_offset[key], 
 					self.guide_map[key]['gather_ind_inner'], axis=1))
 			
 
-			_initial[key] = tf.gather(_initial_core[key] / tf.reshape(tf.reduce_sum(_initial_core[key], axis=1), shape=(-1, 1)),
+			_initial[key] = tf.gather(_initial_core[key] / tf.reshape(tf.reduce_sum(input_tensor=_initial_core[key], axis=1), shape=(-1, 1)),
 					self.batch_map[key]['gather_ind_inner'], 
 					axis=0, 
 					name='initial_read_est_%s' % key
@@ -787,10 +790,10 @@ class Chronos(object):
 		print("building guide efficacy")
 		v_guide_efficacy = tf.Variable(
 			#last guide is dummy
-			tf.random_normal(shape=(1, self.nguides+1), stddev=.01, dtype=dtype),
+			tf.random.normal(shape=(1, self.nguides+1), stddev=.01, dtype=dtype),
 								name='guide_efficacy_base', dtype=dtype)
 		_guide_efficacy = tf.exp(-tf.abs(v_guide_efficacy), name='guide_efficacy')
-		tf.summary.histogram("guide_efficacy", _guide_efficacy)
+		tf.compat.v1.summary.histogram("guide_efficacy", _guide_efficacy)
 		print("built guide efficacy: shape %r" %_guide_efficacy.get_shape().as_list())
 		return v_guide_efficacy, _guide_efficacy
 
@@ -798,7 +801,7 @@ class Chronos(object):
 	def _get_tf_growth_rate(self, dtype):
 		print("building growth rate")
 		v_growth_rate = { key: tf.Variable(
-				tf.random_normal(shape=(self.nlines, 1), stddev=.01, mean=1, dtype=dtype),
+				tf.random.normal(shape=(self.nlines, 1), stddev=.01, mean=1, dtype=dtype),
 								name='growth_rate_base_%s' % key, dtype=dtype)
 				for key in self.keys}
 		_line_presence_mask = {key: tf.constant( np.array([s in self.cells[key] for s in self.all_cells], dtype=self.np_dtype).reshape((-1, 1)) )
@@ -806,7 +809,7 @@ class Chronos(object):
 		_line_presence_boolean = {key: tf.constant( np.array([s in self.cells[key] for s in self.all_cells], dtype=np.bool), dtype=tf.bool)
 										for key in self.keys}
 		_growth_rate_square = {key: (val * _line_presence_mask[key]) ** 2 for key, val in v_growth_rate.items()}
-		_growth_rate = {key: tf.divide(val, tf.reduce_mean(tf.boolean_mask(val, _line_presence_boolean[key])), 
+		_growth_rate = {key: tf.divide(val, tf.reduce_mean(input_tensor=tf.boolean_mask(tensor=val, mask=_line_presence_boolean[key])), 
 								name="growth_rate_%s" % key)
 							for key, val in _growth_rate_square.items()}
 		print("built growth rate: shape %r" % {key: val.get_shape().as_list() 
@@ -817,7 +820,7 @@ class Chronos(object):
 	def _get_tf_cell_efficacy(self, dtype):
 		print("\nbuilding cell line efficacy")
 		v_cell_efficacy = { key: tf.Variable(
-				tf.random_normal(shape=(self.nlines, 1), stddev=.01, mean=0, dtype=dtype),
+				tf.random.normal(shape=(self.nlines, 1), stddev=.01, mean=0, dtype=dtype),
 								name='cell_efficacy_base_%s' % key, dtype=dtype)
 				for key in self.keys}
 		_cell_efficacy = {key: tf.exp(-tf.abs(v_cell_efficacy[key]),
@@ -832,7 +835,7 @@ class Chronos(object):
 		v_screen_delay = tf.Variable(np.sqrt(Chronos.default_timepoint_scale * initial_screen_delay) * np.ones((1, self.ngenes), dtype=self.np_dtype),
 				 dtype=dtype)
 		_screen_delay = tf.square(v_screen_delay, name="screen_delay")
-		tf.summary.histogram("screen_delay", _screen_delay)
+		tf.compat.v1.summary.histogram("screen_delay", _screen_delay)
 		print("built screen delay")
 		return v_screen_delay, _screen_delay
 
@@ -845,10 +848,10 @@ class Chronos(object):
 		v_residue = tf.Variable(gene_effect_est, dtype=dtype, name='GE_deviation') 
 		_residue = v_residue * self._gene_effect_mask
 		_true_residue =  (
-				v_residue - (tf.reduce_sum(v_residue, axis=0)/tf.reduce_sum(self._gene_effect_mask, axis=0) )[tf.newaxis, :]
+				v_residue - (tf.reduce_sum(input_tensor=v_residue, axis=0)/tf.reduce_sum(input_tensor=self._gene_effect_mask, axis=0) )[tf.newaxis, :]
 			) * self._gene_effect_mask
 		_combined_gene_effect = v_mean_effect + _true_residue
-		tf.summary.histogram("mean_gene_effect", v_mean_effect)
+		tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
 		print("built core gene effect: %i cell lines by %i genes" %tuple(_combined_gene_effect.get_shape().as_list()))
 		return v_mean_effect, v_residue, _residue, _true_residue, _combined_gene_effect
 
@@ -857,7 +860,7 @@ class Chronos(object):
 
 	def _get_effect_days(self, _screen_delay, _days):
 		print("\nbuilding effective days")
-		with tf.name_scope("days"):
+		with tf.compat.v1.name_scope("days"):
 			_effective_days = {key: 
 				tf.clip_by_value(val - _screen_delay, 0, 100)
 			for key, val in _days.items()}
@@ -868,7 +871,7 @@ class Chronos(object):
 
 	def _get_gene_effect_growth(self, _combined_gene_effect, _growth_rate):
 		print('\nbuilding gene effect growth graph nodes')
-		with tf.name_scope('GE_G'):
+		with tf.compat.v1.name_scope('GE_G'):
 			_gene_effect_growth = {key: _combined_gene_effect * _growth_rate[key]
 								for key in self.keys}
 		print("built gene effect growth graph nodes, shapes %r" % {key: val.get_shape().as_list() 
@@ -878,7 +881,7 @@ class Chronos(object):
 
 	def _get_combined_efficacy(self, _cell_efficacy, _guide_efficacy):
 		print('\nbuilding combined efficacy')
-		with tf.name_scope('efficacy'):
+		with tf.compat.v1.name_scope('efficacy'):
 			_efficacy = {key: 
 					tf.matmul(_cell_efficacy[key], tf.gather(_guide_efficacy, self.guide_map[key]['gather_ind_outer'], axis=1, name='guide'),
 				 name="combined")
@@ -900,7 +903,7 @@ class Chronos(object):
 		print("\nbuilding growth estimates of edited cells and overall estimates of fold change in guide abundance")
 		_change = {}
 		_growth = {}
-		with tf.name_scope("FC"):
+		with tf.compat.v1.name_scope("FC"):
 			for key in self.keys:
 
 				_growth[key] = tf.gather( 
@@ -937,9 +940,9 @@ class Chronos(object):
 		print("built unnormalized abundance")
 
 		print("\nbuilding normalized estimates of final abundance")
-		with tf.name_scope('out_norm'):
+		with tf.compat.v1.name_scope('out_norm'):
 			_output_norm = {key: 
-					1e6 * tf.divide((val + 1e-32), tf.reshape(tf.reduce_sum(val, axis=1), shape=(-1, 1)),
+					1e6 * tf.divide((val + 1e-32), tf.reshape(tf.reduce_sum(input_tensor=val, axis=1), shape=(-1, 1)),
 						name=key
 						)
 							for key, val in _out.items()}
@@ -974,7 +977,7 @@ class Chronos(object):
 			guide_map_pd[key] = pd.concat([guide_map_pd[key], dummies]).sort_index()
 
 			reg_matrix_ind = guide_map_pd[key].values.reshape((ngenes, max_guides[key])).astype(np.int)
-			_guide_reg_matrix[key] = tf.contrib.framework.sort(
+			_guide_reg_matrix[key] = tf.sort(
 				tf.gather(_guide_reg_base, reg_matrix_ind, axis=0),
 				direction='ASCENDING',
 				name='sorted_guide_reg_%s' % key
@@ -982,13 +985,13 @@ class Chronos(object):
 			if False:#all([val > 2 for val in self.median_timepoint_counts.values()]):
 				# only regularize gap between first and second most efficacious guide
 				_guide_reg_cost[key] = tf.reduce_mean(
-					_guide_reg_matrix[key][:, 1] - _guide_reg_matrix[key][:, 0],
+					input_tensor=_guide_reg_matrix[key][:, 1] - _guide_reg_matrix[key][:, 0],
 					name="guide_reg_cost_%s" % key
 				)
 			else:
 				#regularize total of first and second most efficacious guide - at least two guides must be near 1
 				_guide_reg_cost[key] = tf.reduce_mean(
-					_guide_reg_matrix[key][:, 1] + _guide_reg_matrix[key][:, 0],
+					input_tensor=_guide_reg_matrix[key][:, 1] + _guide_reg_matrix[key][:, 0],
 					name="guide_reg_cost_%s" % key
 				)
 
@@ -1005,7 +1008,7 @@ class Chronos(object):
 		_kernel = tf.constant(kernel, dtype=dtype, name='kernel')[:, tf.newaxis, tf.newaxis]
 		_ge_argsort = tf.argsort(v_mean_effect[0])
 		_residue_sorted = tf.gather(_true_residue, _ge_argsort, axis=1)[:, :, tf.newaxis]
-		_residue_smoothed = tf.nn.convolution(_residue_sorted, _kernel, padding='SAME')
+		_residue_smoothed = tf.nn.convolution(input=_residue_sorted, filters=_kernel, padding='SAME')
 		_smoothed_presum = tf.square(_residue_smoothed)
 		return _smoothed_presum
 
@@ -1013,7 +1016,7 @@ class Chronos(object):
 	def _get_initial_regularization(self, _initial_offset):
 		print("\nbuilding initial reads regularization/cost")
 		_initial_cost = {key:
-			tf.reduce_mean( tf.square(_initial_offset[key]), 
+			tf.reduce_mean( input_tensor=tf.square(_initial_offset[key]), 
 				name='cost_initial_%s' %key)
 			for key in self.keys
 		}
@@ -1023,46 +1026,46 @@ class Chronos(object):
 	def _get_nb2_cost(self, _excess_variance, _output_norm, _rpm, _mask, dtype):
 		print('\nbuilding NB2 cost')
 		
-		with tf.name_scope('cost'):
+		with tf.compat.v1.name_scope('cost'):
 			# the NB2 cost: (yi + 1/alpha) * ln(1 + alpha mu_i) - yi ln(alpha mu_i)
 			# modified with constants and -mu_i - which makes it become the multinomial cost in the limit alpha -> 0
 			_cost_presum = {key: 
 								 	(
-								 		((_rpm[key]+1e-6) + 1./_excess_variance[key]) * tf.log(
+								 		((_rpm[key]+1e-6) + 1./_excess_variance[key]) * tf.math.log(
 								 			(1 + _excess_variance[key] * (_output_norm[key] + 1e-6)) /
 								 			(1 + _excess_variance[key] * (_rpm[key] + 1e-6))
 								 	) +
-									(_rpm[key]+1e-6) * tf.log((_rpm[key] + 1e-6) / (_output_norm[key] + 1e-6) ) 
+									(_rpm[key]+1e-6) * tf.math.log((_rpm[key] + 1e-6) / (_output_norm[key] + 1e-6) ) 
 									)
 								for key in self.keys}
 
-			_scale = tf.placeholder(dtype=dtype, shape=(), name='scale')
-			_cost =  _scale/len(self.keys) * tf.add_n([tf.reduce_mean(tf.boolean_mask(v, _mask[key]))
+			_scale = tf.compat.v1.placeholder(dtype=dtype, shape=(), name='scale')
+			_cost =  _scale/len(self.keys) * tf.add_n([tf.reduce_mean(input_tensor=tf.boolean_mask(tensor=v, mask=_mask[key]))
 			 										 for key, v in _cost_presum.items()]
 			 			)
 
-			tf.summary.scalar("unregularized_cost", _cost)
+			tf.compat.v1.summary.scalar("unregularized_cost", _cost)
 			return _cost_presum, _cost, _scale
 
 
 	def _get_full_cost(self, dtype):
 		print("building other regularizations")
-		with tf.name_scope('full_cost'):
-			self._L1_penalty = self.gene_effect_L1 * tf.square(tf.reduce_sum(self._combined_gene_effect)/self.mask_count) 
-			self._L2_penalty = self.gene_effect_L2 * tf.reduce_sum(tf.square(self._combined_gene_effect))/self.mask_count
-			self._hier_penalty = self.gene_effect_hierarchical * tf.reduce_sum(tf.square(self._true_residue))/self.mask_count
+		with tf.compat.v1.name_scope('full_cost'):
+			self._L1_penalty = self.gene_effect_L1 * tf.square(tf.reduce_sum(input_tensor=self._combined_gene_effect)/self.mask_count) 
+			self._L2_penalty = self.gene_effect_L2 * tf.reduce_sum(input_tensor=tf.square(self._combined_gene_effect))/self.mask_count
+			self._hier_penalty = self.gene_effect_hierarchical * tf.reduce_sum(input_tensor=tf.square(self._true_residue))/self.mask_count
 			self._growth_reg_cost = -self.growth_rate_reg * 1.0/len(self.keys) * tf.add_n([
-													tf.reduce_mean( tf.log(tf.boolean_mask(v, self._line_presence_boolean[key])) )
+													tf.reduce_mean( input_tensor=tf.math.log(tf.boolean_mask(tensor=v, mask=self._line_presence_boolean[key])) )
 													for key, v in self._growth_rate.items()
 																					])
 
-			self._guide_efficacy_reg = tf.placeholder(dtype, shape=())
+			self._guide_efficacy_reg = tf.compat.v1.placeholder(dtype, shape=())
 			self.run_dict[self._guide_efficacy_reg] = self.guide_efficacy_reg
 
 			self._guide_reg_cost = self._guide_efficacy_reg * self._total_guide_reg_cost
-			self._smoothed_cost = self.gene_effect_smoothing * tf.reduce_mean(self._smoothed_presum)
+			self._smoothed_cost = self.gene_effect_smoothing * tf.reduce_mean(input_tensor=self._smoothed_presum)
 
-			self._offset_reg = tf.placeholder(dtype, shape=())
+			self._offset_reg = tf.compat.v1.placeholder(dtype, shape=())
 			self.run_dict[self._offset_reg] = self.offset_reg
 			self._initial_cost_sum = self._offset_reg * 1.0/len(self.keys) * tf.add_n(list(self._initial_cost.values()))
 
@@ -1072,9 +1075,9 @@ class Chronos(object):
 							self._growth_reg_cost + self._initial_cost_sum + \
 							self._smoothed_cost 
 
-			tf.summary.scalar("L1_penalty", self._L1_penalty)
-			tf.summary.scalar("L2_penalty", self._L2_penalty)
-			tf.summary.scalar("hierarchical_penalty", self._hier_penalty)
+			tf.compat.v1.summary.scalar("L1_penalty", self._L1_penalty)
+			tf.compat.v1.summary.scalar("L2_penalty", self._L2_penalty)
+			tf.compat.v1.summary.scalar("hierarchical_penalty", self._hier_penalty)
 		return _full_cost
 
 
@@ -1170,11 +1173,11 @@ class Chronos(object):
 				print(df)
 				print()
 				print(self.sess.run(
-					 tf.log(1 + self._excess_variance_expanded[key] * 1e6 * self._output_norm[key]), self.run_dict)
+					 tf.math.log(1 + self._excess_variance_expanded[key] * 1e6 * self._output_norm[key]), self.run_dict)
 				)
 				print()
 				print(self.sess.run(
-					(self._rpm[key]+1e-6) * tf.log(self._excess_variance_expanded[key] * (self._rpm[key] + 1e-6) )
+					(self._rpm[key]+1e-6) * tf.math.log(self._excess_variance_expanded[key] * (self._rpm[key] + 1e-6) )
 					, self.run_dict)
 				)
 				raise ValueError("%i nulls found in self._cost_presum[%s]" % (pd.isnull(df).sum().sum(), key))
@@ -1275,7 +1278,7 @@ class Chronos(object):
 
 	def __del__(self):
 		for handle in self.persistent_handles:
-			tf.delete_session_tensor(handle)
+			tf.compat.v1.delete_session_tensor(handle)
 
 
 	################################################################################################

@@ -46,15 +46,15 @@ def add_global_shift(cn, y, means, dtype, nknots_cn=10, nknots_ge=5, alpha=.2):
 	v_coeffs = tf.Variable(init.reshape((-1, 1)), dtype=dtype)
 	v_weights = tf.Variable(1e-6 * np.ones(len(spline_gc)), dtype=dtype)
 	_weights = tf.exp(-tf.abs(v_weights))
-	_weight_cost = tf.reduce_mean(tf.square(v_weights))
+	_weight_cost = tf.reduce_mean(input_tensor=tf.square(v_weights))
 
 	_out = _weights * tf.matmul(_spline, v_coeffs)[:, 0]	
-	_cost = tf.reduce_mean(tf.square(_out - _y) )
-	optimizer = tf.train.AdamOptimizer(.005)
+	_cost = tf.reduce_mean(input_tensor=tf.square(_out - _y) )
+	optimizer = tf.compat.v1.train.AdamOptimizer(.005)
 	_step = optimizer.minimize(_cost + alpha * _weight_cost, var_list=[v_coeffs, v_weights])
 	
-	sess = tf.Session()
-	sess.run(tf.global_variables_initializer())
+	sess = tf.compat.v1.Session()
+	sess.run(tf.compat.v1.global_variables_initializer())
 
 	for i in range(501):
 		sess.run(_step)
