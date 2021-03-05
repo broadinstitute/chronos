@@ -1,6 +1,8 @@
 # Chronos: an algorithm for inferring gene fitness effects from CRISPR knockout experiments. 
 Joshua Dempster
 
+A full description and benchmarking of the algorithm are available in a preprint: https://doi.org/10.1101/2021.02.25.432728
+
 # When to use it
 Chronos is well suited for any CRISPR KO experiment where:
 - You measured initial pDNA sgRNA readcounts and readcounts at one or more later time points.
@@ -8,7 +10,7 @@ Chronos is well suited for any CRISPR KO experiment where:
 - You might have one library, or be combining data from multiple libraries.
 - Genome-wide or sub-genome coverage.
 - You expect most cells to be proliferating.
-- You expect the majority of gene knockouts to have little to no effect on prolferation.
+- You expect the majority of gene knockouts to have little to no effect on proliferation.
 - You might or might not have copy number data for your cell lines.
 
 Chronos may not work well for:
@@ -24,7 +26,9 @@ You can also use several Chronos tools independently of running the full model. 
 
 # Installation
 Download, navigate to the Chronos directory, and run
-    $ python setup.py install
+
+`    $ python setup.py install`
+
 in a terminal window. Chronos requires `python 3` with the packages `tensorflow 1.15`, `numpy`, `pandas`, `patsy`, and `h5py`. 
 
 # Getting Started
@@ -36,7 +40,7 @@ To run Chronos, you need three Pandas dataframes:
 
 2. A table with at least two columns, `sgrna` and `gene`, mapping the sgRNAs to genes. Chronos will not accept sgRNAs that map to more than one gene. This is intentional. `sgrna` entries should match the columns in raw readcounts. `gene` can be in any format.
 
-3. A table with at least four columns, `sequence_ID`, `cell_line_name`, `pDNA_batch`, and `days`, mapping sequencing samples to cell lines and pDNA measurements. `sequence_ID` should match the row names of the raw readcounts. 'days' is the number of days between infection and when the sample was collected, should be integer or float. It will be ignored for pDNA samples. `cell_line_name` MUST be "pDNA" for pDNA samples. if, instead of pDNA, you are sequencing your cells at a very early time point to get initial library abundance, treat these as pDNA samples. If you don't have either, Chronos may not be the right algorithm for your experiment. `pDNA_batch` is needed when your experiment combines samples that have different pDNA references (within the same library). This is the case for Achilles because the PCR primer strategy has changed several times during the course of the experiment. pDNA samples belonging to the same batch will be combined into a single reference. If you don't have pDNA batches, just fill this column some value, such as "batch1".
+3. A table with at least four columns, `sequence_ID`, `cell_line_name`, `pDNA_batch`, and `days`, mapping sequencing samples to cell lines and pDNA measurements. `sequence_ID` should match the row names of the raw readcounts. `days` is the number of days between infection and when the sample was collected, should be integer or float. It will be ignored for pDNA samples. `cell_line_name` MUST be "pDNA" for pDNA samples. if, instead of pDNA, you are sequencing your cells at a very early time point to get initial library abundance, treat these as pDNA samples. If you don't have either, Chronos may not be the right algorithm for your experiment. `pDNA_batch` is needed when your experiment combines samples that have different pDNA references (within the same library). This is the case for Achilles because the PCR primer strategy has changed several times during the course of the experiment. pDNA samples belonging to the same batch will be combined into a single reference. If you don't have pDNA batches, just fill this column some value, such as "batch1".
 
 We've found that a small number of clones in CRISPR cell lines will exhibit dramatic outgrowth that seems unrelated to the intended CRISPR perturbation. We recommend you remove these in place by running
 
