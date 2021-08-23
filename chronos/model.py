@@ -678,16 +678,28 @@ class Chronos(object):
 
 
 	def _get_gene_effect_mask(self, dtype):
+		# excludes genes in a cell line with reads from only one library
 		print('\nbuilding gene effect mask')
-		mask = pd.DataFrame(0, index=self.all_cells, columns=self.all_genes, dtype=np.bool)
-		for cell in self.all_cells:
-			libraries = [key for key in self.keys if cell in self.cells[key]]
-			covered_genes = sorted(set.intersection(*[set(self.genes[key]) for key in libraries]))
-			mask.loc[cell, covered_genes] = 1
-		_gene_effect_mask = tf.constant(mask.astype(self.np_dtype).values, dtype=dtype)
-		mask_count = (mask == 1).sum().sum()
-		print('made gene_effect mask, excluded %i (%1.5f) values' % ((mask == 0).sum().sum(), (mask == 0).mean().mean()))
-		return _gene_effect_mask, mask_count
+
+		if len(self.keys) == 1: #only one library, therefore no mask
+			_gene_effect_mask = tf.constant(1, shape=(len(self.all_cells), len(self.all_genes)), dtype=dtype)
+			mask_count = len(self.all_cells) * len(self.all_genes)
+			print("built mask with no exclusions")
+			return _gene_effect_mask, mask_count
+		else:
+			print(self.keys)
+
+			mask = {}#pd.DataFrame(0, index=self.all_cells, columns=self.all_genes, dtype=np.bool)
+			for cell in self.all_cells:
+				libraries = [key for key in self.keys if cell in self.cells[key]]
+				covered_genes = sorted(set.intersection(*[set(self.genes[key]) for key in libraries]))
+				mask[cell] = pd.Series(1, index=covered_genes, dtype=self.np_dtype)
+			mask = pd.DataFrame(mask).T.reindex(index=self.all_cells, columns=self.all_genes).fillna(0)
+			_gene_effect_mask = tf.constant(mask.values, dtype=dtype)
+			mask_count = (mask == 1).sum().sum()
+			print('made gene_effect mask, excluded %i (%1.5f) values' % ((mask == 0).sum().sum(), (mask == 0).mean().mean()))
+			return _gene_effect_mask, mask_count
+
 
 
 	def _get_days(self, sequence_map, dtype):	
