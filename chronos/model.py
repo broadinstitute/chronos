@@ -1334,7 +1334,7 @@ class Chronos(object):
 				raise ValueError("tried to assign cell efficacy for %s but missing %r" % (key, missing))
 			try:
 				self.sess.run(self.v_cell_efficacy[key].assign(
-					Chronos.inverse_efficacy(desired_efficacy[key].loc[self.all_cells].fillna(1).values).reshape((-1, 1))
+					Chronos.inverse_efficacy(desired_efficacy[key].reindex(self.all_cells).fillna(1).values).reshape((-1, 1))
 				))
 			except ValueError as e:
 				print(key)
@@ -1352,7 +1352,7 @@ class Chronos(object):
 			if len(missing) > 0:
 				raise ValueError("tried to assign cell efficacy for %s but missing %r" % (key, missing))
 			self.sess.run(self.v_growth_rate[key].assign(
-				val.loc[self.all_cells].fillna(1).values.reshape((-1, 1)))
+				val.reindex(self.all_cells).fillna(1).values.reshape((-1, 1)))
 			)
 	
 	@property
@@ -1366,7 +1366,7 @@ class Chronos(object):
 	@gene_effect.setter
 	def gene_effect(self, desired_effect):
 		mask = self.sess.run(self._gene_effect_mask)
-		de = desired_effect.loc[self.all_cells, self.all_genes]
+		de = desired_effect.reindex(self.all_cells, self.all_genes)
 		if ((desired_effect.notnull() + mask) == 1).any().any():
 			print("Warning: received some nonull values for genes in cell lines that have no guides targeting them, or inappropriate null values")
 		de[mask == 0] = np.nan 
