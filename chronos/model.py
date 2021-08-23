@@ -670,7 +670,7 @@ class Chronos(object):
 
 	def _initialize_graph(self, max_learning_rate, dtype):
 		print('initializing graph')
-		self.sess = tf.Session()
+		self.sess = tf.compat.v1.Session()
 		self._learning_rate = tf.placeholder(shape=tuple(), dtype=dtype)
 		self.run_dict = {self._learning_rate: max_learning_rate}
 		self.max_learning_rate = max_learning_rate
