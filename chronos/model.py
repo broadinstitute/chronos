@@ -18,7 +18,7 @@ The Broad Institute
 def write_hdf5(df, filename):
 	if os.path.exists(filename):
 		os.remove(filename)
-	dest = h5py.File(filename)
+	dest = h5py.File(filename, 'w')
 
 	try:
 		dim_0 = [x.encode('utf8') for x in df.index]
@@ -96,13 +96,13 @@ def check_inputs(readcounts=None, guide_gene_map=None, sequence_map=None):
 	
 	for key in keys:
 		if not readcounts is None and not sequence_map is None:
-			assert not set(readcounts[key].index) - set(sequence_map[key].sequence_ID), \
+			assert not set(readcounts[key].index) ^ set(sequence_map[key].sequence_ID), \
 				"\t\t\t mismatched sequence IDs between readcounts and sequence map for %r.\n\
 				 Chronos expects `readcounts` to have guides as columns, sequence IDs as rows.\n\
 				 Is your data transposed?" %key
 
 		if not readcounts is None and not guide_gene_map is None:
-			assert not set(readcounts[key].columns) - set(guide_gene_map[key].sgrna), \
+			assert not set(readcounts[key].columns) ^ set(guide_gene_map[key].sgrna), \
 				"mismatched map keys between readcounts and guide map for %s" % key
 
 
