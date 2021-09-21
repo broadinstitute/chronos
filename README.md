@@ -85,6 +85,9 @@ If you have labeled gene_level copy number data, Chronos has an option to correc
 
 The copy number matrix needs to be aligned to the gene_effect_matrix. Additionally, we assume that it is in the current CCLE format: log2(relative CN + 1), where CN 1 means the relative CN matches the reference. This may still work fine with CN with different units, but has not been tested. 
 
+# Expected run times
+The full Achilles dataset takes 3-4 hours to run a gcloud VM with 52 GB of memory. Training the vignette in this package should take around 2 minutes on a typical laptop.
+
 # Other Chronos Options
 The Chronos model has a large number of hyperparameters which are described in the model code. Generally we advise against changing these. We've tested them in a wide variety of experimental settings and found the defaults work well. However, a few may be worth tweaking if you want to try and maximize performance. If you do choose to tune the hyperparameters, make sure you evaluate the results with a metric that captures what you really want to get out of the data. We decribe those that might be worth changing.
 
