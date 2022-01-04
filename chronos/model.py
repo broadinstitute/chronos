@@ -9,6 +9,9 @@ from time import time
 from datetime import timedelta
 import h5py
 
+if tf.__version__ < "2":
+	raise ImportError("Chronos requires tensorflow 2 or greater. Your version is %s." % tf.__version__)
+
 
 tf.compat.v1.disable_eager_execution()
 

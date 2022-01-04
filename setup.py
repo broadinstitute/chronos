@@ -9,5 +9,5 @@ setup(
     packages=find_packages(),
     package_data={'': ['*.r']},
     # Install requirements via pip install -r requirements.txt
-    # install_requires=[...]
+    install_requires=['tensorflow>=2', 'numpy>=1.19', 'pandas>=0.24', 'h5py>=3']
 )
