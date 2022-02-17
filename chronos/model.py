@@ -314,7 +314,7 @@ class Chronos(object):
 				 offset_reg=1,
 				 growth_rate_reg=0.01,
 				 smart_init=True,
-				 cell_efficacy_guide_quantile=0.01,
+				 cell_efficacy_guide_quantile=0.02,
 				 initial_screen_delay=3,
 				 scale_cost=0.67,
 				 max_learning_rate=.02,
@@ -1098,7 +1098,7 @@ class Chronos(object):
 
 #########################    F  I  N  A  L  I  Z  I  N  G    ###################################
 
-	def cell_efficacy_estimate(self, fold_change, sequence_map, last_reps, cell_efficacy_guide_quantile=.01):
+	def cell_efficacy_estimate(self, fold_change, sequence_map, last_reps, cell_efficacy_guide_quantile=.02):
 		'''
 		Estimate the maximum depletion possible in cell lines as the lowest X percentile guide fold-change in
 		the last timepoint measured. Multiple replicates for a cell line at the same last timepoint are median-collapsed
