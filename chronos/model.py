@@ -1105,12 +1105,13 @@ class Chronos(object):
 		before the percentile is measured.
 		'''
 		fc = fold_change.loc[last_reps].groupby(sequence_map.set_index('sequence_ID').cell_line_name).median()
-		cell_efficacy = 1 - fc.quantile(cell_efficacy_guide_quantile, axis=1)
+		medians = fc.median()
+		depleting_guides = medians.loc[lambda x: x < medians.quantile(cell_efficacy_guide_quantile)].index
+		cell_efficacy = 1 - fc[depleting_guides].median(axis=1)
 		if (cell_efficacy <=0 ).any() or (cell_efficacy > 1).any() or cell_efficacy.isnull().any():
 			raise RuntimeError("estimated efficacy outside bounds. \n%r\n%r" % (cell_efficacy.sort_values(), fc))
 
 		return cell_efficacy
-
 
 	def smart_initialize(self, readcounts, sequence_map, cell_efficacy_guide_quantile):
 		cell_eff_est = {}
