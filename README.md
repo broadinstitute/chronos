@@ -47,7 +47,7 @@ or
 
 `    $ pip install .`
 
-in a terminal window. Chronos requires `python 3` with the packages `tensorflow 1.15`, `numpy`, `pandas`, `patsy`, and `h5py`. 
+in a terminal window. Chronos requires `python 3` with the packages `tensorflow >= 1.15` (preferably 2.x), `numpy`, `pandas`, `patsy`, and `h5py`. 
 
 # Getting Started
 If you have jupyter notebook, you should run through `Vignette.ipynb`. This will both verify that you have a working installation and demonstrate a typical workflow for Chronos. Chronos is meant to be run in a python environment. 
