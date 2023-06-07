@@ -36,7 +36,10 @@ You can also use several Chronos tools independently of running the full model. 
 
 
 # Installation
-Download, navigate to the Chronos directory, and run
+**IF YOU ARE USING A MAC WITH AN M1 PROCESSESOR**
+Pip's installation of tensorflow WILL NOT work (as of: 06/07/2023). Here is a suggested procedure to get tensorflow installed on M1 machines: https://caffeinedev.medium.com/how-to-install-tensorflow-on-m1-mac-8e9b91d93706. Make sure you can successfully import tensorflow in python before installling Chronos: from the console run `python` then `import tensorflow` and veryify that the kernel doesn't crash. 
+
+Download, navigate to the Chronos directory, and in a console run
 
 `    $ python setup.py install`
 
