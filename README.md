@@ -35,11 +35,13 @@ If you followed those instructions, you may find that running the vignette with 
 
 ## Installing Chronos
 
-Download, navigate to the Chronos directory, and run 
+If you have `pip` installed, you can install Chronos from pyPI with
 
-`    $ python pip .`
+`    $ pip install crispr_chronos`
 
-in a terminal window. Chronos `model` requires `python 3` with the packages `tensorflow 2.x`, `numpy`, `pandas`,`h5py`. However, additional modules require additional packages which will be installed by default if missing: `patsy`, `statsmodels`, `scipy`, `matplotlib`, `seaborn`, `adjust_text`, `scikit-learn`, `umap`, `reportlab`.
+However, we recommend downloading this repository as well to run the vignette and download the DepMap trained Chronos parameters.
+
+Chronos `model` requires `python 3` with the packages `tensorflow 2.x`, `numpy`, `pandas`,`h5py`. However, additional modules require additional packages which will be installed by default if missing: `patsy`, `statsmodels`, `scipy`, `matplotlib`, `seaborn`, `adjust_text`, `scikit-learn`, `umap`, `reportlab`.
 
 # Getting Started
 If you have jupyter notebook, you should run through `Vignette.ipynb`. This will both verify that you have a working installation and demonstrate a typical workflow for Chronos. Chronos is meant to be run in a python environment. 
