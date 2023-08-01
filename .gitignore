@@ -1,4 +1,11 @@
 *.DS_store
-chronos.egg-info
+Data/Achilles_run/
+Data/logs/
+Data/reports
+Data/DepMapParameters/
+*.egg-info
 *.pyc
-*.ipynb_checkpoints
+.ipynb_checkpoints/
+build/
+dist/
+chronos/__pycache__

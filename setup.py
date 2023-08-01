@@ -1,13 +1,23 @@
 import os
 from setuptools import setup, find_packages
 
+extras_require = {
+	"copy_correction": ["patsy>=0.5.2"],
+	"evaluations": ["matplotlib>=3.6", "seaborn>=0.12", "scikit-learn>=1.1", "statsmodels>=0.13", "scipy>=1.9"],
+	"adjust_text": ["adjustText"],
+	"embedding": ["umap-learn>=0.5.3"],
+	"reports": ["reportlab>=3.6"],
+	"model": ["numpy>=1.2", "pandas>=1.3", "tensorflow>2", "h5py>=3.7"]
+}
+extras_require['all'] = sorted(set.union(*[set(v) for v in extras_require.values()]))
+
 setup(
-    name='chronos',
-    version='0.1.2',
-    author="Joshua Dempster",
-    description="Time series modeling of CRISPR KO readcounts",
-    packages=find_packages(),
-    package_data={'': ['*.r']},
-    # Install requirements via pip install -r requirements.txt
-    install_requires=['tensorflow>=2', 'numpy>=1.19', 'pandas>=0.24', 'h5py>=3']
+	name='crispr_chronos',
+	version='2.0.5',
+	author="BroadInstitute CDS",
+	description="Time series modeling of CRISPR perturbation readcounts in biological data",
+	packages=find_packages(),
+	package_data={'': ['*.r']},
+	install_requires=extras_require['all']
+	#extras_require = extras_require
 )

@@ -1,4 +1,8 @@
-from patsy import dmatrix
+try:
+	from patsy import dmatrix
+except ModuleNotFoundError:
+	raise ModuleNotFoundError("patsy required for copy_correction submodule. \
+Try `pip install patsy`")
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -56,6 +60,7 @@ def add_global_shift(cn, y, means, dtype, nknots_cn=10, nknots_ge=5, alpha=.2):
 	sess = tf.compat.v1.Session()
 	sess.run(tf.compat.v1.global_variables_initializer())
 
+
 	for i in range(501):
 		sess.run(_step)
 		if not i%100:
@@ -77,7 +82,7 @@ def get_adjusted_matrix(shifts, gene_effect,):
 		index=ge.index
 	).reset_index()
 
-	adjusted = adjusted.pivot(index="level_0", columns="level_1")[0]
+	adjusted = pd.pivot(adjusted, index=adjusted.columns[0], columns=adjusted.columns[1])[0]
 	adjusted.index.name = "cell_line_name"
 	adjusted.columns.name = "gene"
 	return adjusted
