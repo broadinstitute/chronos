@@ -18,7 +18,7 @@ import os
 from matplotlib import pyplot as plt
 import seaborn as sns
 
-from cds.plotting import density_scatter, dict_plot
+from .plotting import density_scatter, dict_plot
 from scipy.stats import pearsonr
 from statsmodels.stats.multitest import fdrcorrection
 
