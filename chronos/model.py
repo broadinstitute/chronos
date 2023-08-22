@@ -891,6 +891,9 @@ class Chronos(object):
 		# this is normalized to have sum 1, then multiplied by _pdna_scale to get the absolute expected reads.
 		self._predicted_readcounts_unscaled, self._predicted_readcounts = self._get_abundance_estimates(self._t0, self._change)
 
+		init_op = tf.compat.v1.global_variables_initializer()
+		print('initializing precost variables')
+		self.sess.run(init_op)
 
 		#####################################    C  O  S  T    #########################################
 
@@ -902,8 +905,10 @@ class Chronos(object):
 
 		self._t0_cost = self._get_t0_regularization(self._t0_offset)
 			
-		self._cost_presum, self._cost, self._scale = self._get_nb2_cost(self._excess_variance, self._predicted_readcounts, 
-			self._normalized_readcounts, self._mask, dtype)
+		self._cost_presum, self._cost_constant, self._cost, self._scale = self._get_nb2_cost(
+			self._excess_variance, self._predicted_readcounts, 
+			self._normalized_readcounts, self._mask, dtype
+		)
 
 		self._library_means, self._library_batch_cost = self._get_library_batch_reg(
 			self._true_residue, self.library_batch_reg, dtype
@@ -942,8 +947,7 @@ class Chronos(object):
 			self.log_dir = log_dir
 			self.writer = tf.compat.v1.summary.FileWriter(log_dir, self.sess.graph)
 		
-		init_op = tf.compat.v1.global_variables_initializer()
-		print('initializing variables')
+		print('initializing rest of graph')
 		self.sess.run(init_op)
 
 		if scale_cost:
@@ -1681,25 +1685,41 @@ class Chronos(object):
 		with tf.compat.v1.name_scope('cost'):
 			# the NB2 cost: (yi + 1/alpha) * ln(1 + alpha mu_i) - yi ln(alpha mu_i)
 			# modified with constants and -mu_i - which makes it become the multinomial cost in the limit alpha -> 0
-			_cost_presum = {key: 
-									(
+			_cost_presum = {key:
+				(
 										((_normalized_readcounts[key]+1e-6) + 1./_excess_variance[key]) * tf.math.log(
-											(1 + _excess_variance[key] * (_predicted_readcounts[key] + 1e-6)) /
-											(1 + _excess_variance[key] * (_normalized_readcounts[key] + 1e-6))
-									) +
+											1 + _excess_variance[key] * (_predicted_readcounts[key] + 1e-6)
+									) -
 										(_normalized_readcounts[key]+1e-6) * tf.math.log(
-											(_normalized_readcounts[key] + 1e-6) / (_predicted_readcounts[key] + 1e-6) 
+											(_excess_variance[key] * _predicted_readcounts[key] + 1e-6)
 										)
 									)
 								for key in self.keys}
 
+			readcounts = self.normalized_readcounts
+			ev = self.excess_variance
+			_cost_constant = {key: tf.constant(np.nansum(
+									
+										((readcounts[key].values+1e-6) + 1./ev[key].values.reshape((-1, 1)))\
+										 * np.log(
+											(1 + ev[key].values.reshape((-1, 1)) * (readcounts[key].values + 1e-6))
+									) -
+										(readcounts[key].values+1e-6) * np.log(
+											ev[key].values.reshape((-1, 1))*readcounts[key].values + 1e-6 
+										)
+									))
+									 for key in self.keys}
+
 			_scale = tf.compat.v1.placeholder(dtype=dtype, shape=(), name='scale')
-			_cost =  _scale/len(self.keys) * tf.add_n([tf.reduce_sum(input_tensor=tf.boolean_mask(tensor=v, mask=_mask[key]))
+			_cost =  _scale/len(self.keys) * (
+				tf.add_n([tf.reduce_sum(input_tensor=tf.boolean_mask(tensor=v, mask=_mask[key]))
 													 for key, v in _cost_presum.items()]
 						)
+				- tf.add_n(_cost_constant.values())
+			)
 
 			tf.compat.v1.summary.scalar("unregularized_cost", _cost)
-			return _cost_presum, _cost, _scale
+			return _cost_presum, _cost_constant, _cost, _scale
 
 
 	def _get_full_cost(self, dtype):
