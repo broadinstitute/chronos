@@ -947,6 +947,7 @@ class Chronos(object):
 			self.log_dir = log_dir
 			self.writer = tf.compat.v1.summary.FileWriter(log_dir, self.sess.graph)
 		
+		init_op = tf.compat.v1.global_variables_initializer()
 		print('initializing rest of graph')
 		self.sess.run(init_op)
 
