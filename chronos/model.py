@@ -1699,14 +1699,17 @@ class Chronos(object):
 
 			readcounts = self.normalized_readcounts
 			ev = self.excess_variance
+			ev = {key: ev[key].loc[readcounts[key].index].values.reshape((-1, 1))
+				for key in self.keys
+			}
 			_cost_constant = {key: tf.constant(np.nansum(
 									
-										((readcounts[key].values+1e-6) + 1./ev[key].values.reshape((-1, 1)))\
+										((readcounts[key].values+1e-6) + 1./ev[key])\
 										 * np.log(
-											(1 + ev[key].values.reshape((-1, 1)) * (readcounts[key].values + 1e-6))
+											(1 + ev[key] * (readcounts[key].values + 1e-6))
 									) -
 										(readcounts[key].values+1e-6) * np.log(
-											ev[key].values.reshape((-1, 1))*readcounts[key].values + 1e-6 
+											ev[key]*readcounts[key].values + 1e-6 
 										)
 									))
 									 for key in self.keys}
@@ -2447,7 +2450,6 @@ your data" % missing
 			)
 			for key in self.keys
 		}
-
 
 
 	@property
