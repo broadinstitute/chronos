@@ -298,7 +298,8 @@ def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=
 						columns=assembled.columns)
 
 
-def estimate_alpha(normalized_readcounts, negative_control_sgrnas, sequence_map, exclude_range=2.0):
+def estimate_alpha(normalized_readcounts, negative_control_sgrnas, sequence_map, exclude_range=2.0,
+	use_line_mean_as_reference=5):
 	'''
 	Estimates the overdispersion parameter alpha in the NB2 model: variance = mean * (1 + alpha * mean)
 	Alpha is estimated using an "auxiliary" OLS model. The true mean of negative controls is assumed to
@@ -316,6 +317,9 @@ def estimate_alpha(normalized_readcounts, negative_control_sgrnas, sequence_map,
 								cell lines for a given pDNA batch deviates from the pDNA abundance by more than `exclude_range` 
 								in log space, it will be excluded in that batch. Batches with fewer than 5 cell lines will not
 								be filtered by this value.
+		use_line_mean_as_reference (`int`): when at least this many lines are present for a pDNA batch, use the average
+								of late time point sequences for that batch as the expected counts instead of pDNA counts.
+								This gets around the problem of pDNA error.
 	Returns:
 		alphas (`pandas.Series`): a per-cell_line estimate of alpha.
 	'''
@@ -358,18 +362,18 @@ systematically over- or under-represented in the screens and excluded." % (
 	if (1-mask).sum(axis=1).min() < 100:
 		raise ValueError("Fewer than 100 negative control sgRNAs remaining in one or more \
 batches, too few to estimate overdispersion.")
-	# if there are less than five lines in a batch, we don't want to exclude negative
-	# controls on the basis of being offset. 
+	# if there are less than `use_line_mean_as_reference` lines in a batch, we don't want to 
+	# exclude negative controls on the basis of being offset. 
 	n_lines = sequence_map\
 				.query("cell_line_name != 'pDNA'")\
 				.groupby("pDNA_batch")\
 				.cell_line_name\
 				.nunique()
 
-	too_few = n_lines.loc[lambda x: x < 5].index
+	too_few = n_lines.loc[lambda x: x < use_line_mean_as_reference].index
 	mask.loc[too_few] = False
 	# for batches with enough cell lines, use replicate median as reference instead
-	for batch in n_lines.loc[lambda x: x >= 5].index:
+	for batch in n_lines.loc[lambda x: x >= use_line_mean_as_reference].index:
 		expected.loc[batch] = normalized_readcounts.loc[
 			rep_ids.loc[batch], 
 			negative_control_sgrnas
@@ -633,7 +637,8 @@ class Chronos(object):
 				 dtype=tf.double,
 				 verify_integrity=True, 
 				 log_dir=None,
-				 to_normalize_readcounts=True
+				 to_normalize_readcounts=True,
+				 use_line_mean_as_reference=5
 				):
 		'''
 		Parameters:
@@ -690,6 +695,7 @@ class Chronos(object):
 			to_normalize_readcounts (`bool`): If true, the readcounts will be normalized. if negative_control_sgRNAs are provided,
 								Chronos will normalize such that the median log reads of negative controls in each replicate match
 								the median in the pDNA batch. 
+			use_line_mean_as_reference (`int`): passed to `estimate_alpha`
 
 		Attributes:
 			Attributes beginning wit "v_" are tensorflow variables, and attributes beginning with _ are 
@@ -798,6 +804,7 @@ class Chronos(object):
 		self.kernel_width = float(kernel_width)
 		self.cell_efficacy_guide_quantile = float(cell_efficacy_guide_quantile)
 		self.library_batch_reg = float(library_batch_reg)
+		self.use_line_mean_as_reference = use_line_mean_as_reference
 
 		if not 0 < self.cell_efficacy_guide_quantile < .5:
 			raise ValueError("cell_efficacy_guide_quantile should be greater than 0 and less than 0.5")
@@ -808,7 +815,7 @@ class Chronos(object):
 		#the alpha parameter of an NB2 model for readcount noise, one value per sequence, dict by library
 		#behavior depends on whether negative_control_sgrnas are supplied for each library.
 		excess_variance = self._estimate_excess_variance(
-			excess_variance, readcounts, negative_control_sgrnas, sequence_map
+			excess_variance, readcounts, negative_control_sgrnas, sequence_map, use_line_mean_as_reference
 		)
 		self._excess_variance = self._get_excess_variance_tf(excess_variance)
 
@@ -1143,7 +1150,8 @@ class Chronos(object):
 ##################    A  S  S  I  G  N       C  O  N  S  T  A  N  T  S   #######################
 
 
-	def _estimate_excess_variance(self, excess_variance, readcounts, negative_control_sgrnas, sequence_map):
+	def _estimate_excess_variance(self, excess_variance, readcounts, negative_control_sgrnas, sequence_map,
+			use_line_mean_as_reference):
 		print('Estimating or aligning variances')
 		if not isinstance(excess_variance, dict):
 			prior_variance = excess_variance
@@ -1152,7 +1160,8 @@ class Chronos(object):
 			if not (negative_control_sgrnas.get(key) is None) and not key in excess_variance:
 				print('\tEstimating excess variance (alpha) for %s' % key)
 				excess_variance[key] = estimate_alpha(
-						readcounts[key], negative_control_sgrnas[key], sequence_map[key]
+						readcounts[key], negative_control_sgrnas[key], sequence_map[key],
+						use_line_mean_as_reference=use_line_mean_as_reference
 					)[self.index_map[key]]
 			elif not key in excess_variance:
 				excess_variance[key] = pd.Series(prior_variance, index=self.index_map[key])

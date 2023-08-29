@@ -129,7 +129,7 @@ def unique_permutations(array):
 	out = []
 	for v in permutations(array):
 		arr = np.array(v)
-		if any([np.all(arr == o) for o in out]) or np.all(arr == array) or np.none(arr == array):
+		if any([np.all(arr == o) for o in out]) or np.all(arr == array) or ~np.any(arr == array):
 			continue
 		out.append(arr)
 	return out
@@ -140,14 +140,14 @@ def unique_permutations_no_reversed(array):
 	for v in permutations(array):
 		arr = np.array(v)
 		if any([np.all(arr == o) for o in out]) or np.all(arr == array) \
-				or np.none(arr == array) or any([np.none(arr == o) for o in out]):
+				or ~np.any(arr == array) or any([~np.any(arr == o) for o in out]):
 			continue
 		out.append(arr)
 	return out
 
 
 	
-def create_permuted_sequence_maps(condition_map, condition_pair=None):
+def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reverse=False):
 	base = filter_sequence_map_by_condition(condition_map, condition_pair)
 
 	if condition_pair is None:
@@ -168,23 +168,26 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 		y['cell_line_name'] = line
 		
 		if line == 'pDNA':
-			stack.append(y)
+			pdna = y
 			continue
-			
-		condition_replicate_sum = y.groupby("replicate").condition.nunique()
-		if (condition_replicate_sum > 1).any():
-			raise ValueError("a sequence map with the same replicate of a cell line %s in multiple conditions was passed.\
-Replicates must be unique to the condition.\n%r" %(line, y))
-			
-		original = y['condition'].copy()
-		original_reversed = y["reverse_condition"].copy()
 
+		stack[line] = []
+		if allow_reverse:
+			perms = unique_permutations(y.condition)
+		else:
+			perms = unique_permutations_no_reversed(y.condition)
 
-		while (y['condition'] == original).all() or (y['condition'] == original_reversed).all():
-			np.random.shuffle(y['condition'].values)
-		stack.append(y)
+		for perm in perms:
+				stack[line].append(y.copy())
+				stack[line][-1]["condition"] = perm
+				stack[line][-1]["cell_line_name"] = line
+
+	min_unique_permutations = min(len(v) for v in stack.values())
+	out = []
+	for i in range(min_unique_permutations):
+		out.append(pd.concat([v[i] for v in stack.values()] + [pdna]))
 		
-	return(create_condition_sequence_map(pd.concat(stack, axis=0, ignore_index=True)))
+	return [create_condition_sequence_map(v, condition_pair) for v in out]
 
 
 def check_condition_map(condition_map):
@@ -195,6 +198,7 @@ def check_condition_map(condition_map):
 			raise ValueError(
 				"`condition_map[%s]` missing expected columns %r" % (key, missing)
 			)
+
 
 
 
@@ -242,9 +246,9 @@ every map.")
 		return condition_pair
 
 
-	def compare_conditions(self, condition_pair=None, comparison_effect="likelihood",
-		comparison_statistic=None, tail="right",
-			n_null_iterations=10, n_readcount_total_bins=10, 
+	def compare_conditions(self, condition_pair=None, comparison_effect="gene_effect",
+		comparison_statistic=None, tail="both", n_readcount_total_bins=4, allow_reversed_permutations=None,
+			max_null_iterations=12, 
 				**kwargs):
 
 		if comparison_statistic is None and isinstance(comparison_effect, str):
@@ -261,6 +265,16 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			raise ValueError("`comparison_statistic` must be a callable that accepts 3 \
 `pandas.Series` or %r" % list(self.comparison_statistic_dict.keys())
 			)
+
+		if allow_reversed_permutations is None:
+			# in the one tailed tests, counting conditions where the permutations have been completely
+			# flipped is cheating
+			if tail == "right" or tail == "left":
+				allow_reversed_permutations = False
+			elif tail == "both":
+				allow_reversed_permutations = True
+			else:
+				raise ValueError("`tail` must be 'left', 'right', or 'both'")
 
 		condition_pair = self._check_condition_pair(condition_pair)
 
@@ -280,8 +294,8 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 		print("training model with permuted conditions")
 		self.permuted_maps, self.permuted_results, \
 			permuted_gene_effects = self.get_permuted_results(
-			n_null_iterations, self.nondistinguished_map, condition_pair, 
-			comparison_effect, **kwargs
+			max_null_iterations, self.nondistinguished_map, condition_pair, 
+			comparison_effect, allow_reversed_permutations, **kwargs
 		)
 
 		print("calculating statistics")
@@ -426,13 +440,15 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			 readcounts=retained_readcounts,
 			 sequence_map=nondistinguished_map,
 			 guide_gene_map=self.guide_gene_map,
+			 use_line_mean_as_reference=np.inf,
 			 **self.kwargs
 		)
 		nondistinguished_model.train(**kwargs)
 
 		nondistinguished_result = comparison_effect(nondistinguished_model)
 		nondistinguished_gene_effect = nondistinguished_model.gene_effect
-		del nondistinguished_model
+		#del nondistinguished_model
+		self.nondistinguished_model = nondistinguished_model
 
 		return nondistinguished_map, retained_readcounts, nondistinguished_result,\
 			nondistinguished_gene_effect
@@ -449,55 +465,51 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			readcounts=self.retained_readcounts,
 			sequence_map=distinguished_map,
 			guide_gene_map=self.guide_gene_map,
+			 use_line_mean_as_reference=np.inf,
 			**self.kwargs
 		)
 		distinguished_model.train(**kwargs)
 
 		distinguished_result = comparison_effect(distinguished_model)
 		distinguished_gene_effect = distinguished_model.gene_effect
-		del distinguished_model
+		#del distinguished_model
+		self.distinguished_model = distinguished_model
 
 		return distinguished_map, distinguished_result, distinguished_gene_effect
 
 
-	def get_permuted_results(self, n_iterations, nondistinguished_map, condition_pair, 
-			comparison_effect, **kwargs
+	def get_permuted_results(self, max_null_iterations, nondistinguished_map, condition_pair, 
+			comparison_effect, allow_reversed_permutations, **kwargs
 		):
 
+		permuted_maps = {
+			key: create_permuted_sequence_maps(nondistinguished_map[key], condition_pair, 
+												allow_reversed_permutations)
+			for key in self.keys
+		}
+		min_permutations = min([len(permuted_maps[key]) for key in self.keys])
+		permuted_maps = [{key: permuted_maps[key][i] for key in self.keys} for i in range(min_permutations)]
 		out = []
-		permuted_maps = []
 		permuted_gene_effects = []
-		for i in range(n_iterations):
+		counts = 0
+		for i, permuted_map in enumerate(permuted_maps):
 			print('\n\n&&&&&&&&&&&&&&&&\nrandom iteration %i\n&&&&&&&&&&&&&&&&\n\n' %i)
-
-			permuted_map = {
-				key: create_randomized_sequence_map(
-					nondistinguished_map[key], 
-					condition_pair
-				)
-				for key in self.keys
-			}
-
-			if any([
-				any([
-					(permuted_map[key].condition.dropna() == m[key].condition.dropna()).all()
-					for key in self.keys
-				]) 
-				for m in permuted_maps
-			]):
-				continue
 				
 			permuted_model = Chronos(readcounts=self.retained_readcounts, 
 								 sequence_map=permuted_map,
 								 guide_gene_map=self.guide_gene_map,
+								  use_line_mean_as_reference=np.inf,
 								**self.kwargs
 								)
 			permuted_model.train(**kwargs)
 
 			out.append(comparison_effect(permuted_model))
-			permuted_maps.append(permuted_map)
 			permuted_gene_effects.append(permuted_model.gene_effect)
 			del permuted_model
+
+			counts += 1
+			if counts == max_null_iterations:
+				break
 
 		return permuted_maps, out, permuted_gene_effects
 
