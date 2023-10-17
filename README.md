@@ -29,9 +29,7 @@ Chronos is competitive with or superior to the other CRISPR algorithms we tested
 
 ## Note on Mac M1 chips
 
-As of 2023/07/14, `pip` will not correctly install tensorflow on Macs with the M1 chip. You can try the instructions here: https://caffeinedev.medium.com/how-to-install-tensorflow-on-m1-mac-8e9b91d93706 but they appear to fail for python 3.10. Reversion to 3.8 led to success. Make sure you can import tensorflow in python without the kernel hanging before proceeding. 
-
-If you followed those instructions, you may find that running the vignette with multiple libraries could also cause the error "cannot assign a device for operation ReadVariableOp." Uninstalling tensorflow-metal will fix this error but may disable running on the GPU. But in general we do not recommend running Chronos on the GPU.
+As of 09/01/2023, `pip install tensorflow` should work on Macs with arm64.
 
 ## Installing Chronos
 
