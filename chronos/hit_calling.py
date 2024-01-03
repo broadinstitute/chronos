@@ -83,8 +83,6 @@ def filter_sequence_map_by_condition(condition_map, condition_pair=None):
 	at least two replicates per condition and returns the new map.
 	'''
 	out = condition_map.copy()
-	if not 'replicate' in out.columns:
-		out['replicate'] = out['sequence_ID']
 		
 	if condition_pair is None:
 		condition_pair = out.query("cell_line_name != 'pDNA'").condition.unique()
@@ -112,7 +110,7 @@ in `condition_pair`: %r/n/n%r" % (condition_pair, condition_map))
 					.query("condition in %r" % list(condition_pair))\
 					.query("cell_line_name != 'pDNA'")\
 					.groupby(["cell_line_name", "condition"])\
-					.replicate\
+					.sequence_ID\
 					.nunique()
 	if (replicate_counts < 2).all():
 		raise ValueError("No cell lines in `condition_map` had at least 2 replicates in both conditions \
@@ -173,15 +171,19 @@ def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reve
 	mirroring permutations are discarded. E.g. if `condition` in `condition_map` is ['A', 'A', 'B', 'B'],
 	only ['A', 'B', 'A', 'B'] and ['A', 'B', 'B', 'A'] are returned.
 	'''
-	base = filter_sequence_map_by_condition(condition_map, condition_pair)
+	seq_map = filter_sequence_map_by_condition(condition_map, condition_pair)
 
 	if condition_pair is None:
-		condition_pair = base.query("cell_line_name != 'pDNA'").condition.unique()
+		condition_pair = seq_map.query("cell_line_name != 'pDNA'").condition.unique()
 	if len(condition_pair) != 2:
 		raise ValueError("can only compare two conditions. If `condition_pair` is not passed, \
 the 'condition' column of `condition_map` must have exactly two unique values for non-pDNA entries.")
+
+	#drop days column for identifying possible permutations
+	days_map = seq_map[['cell_line_name','days']].drop_duplicates()
+	base = seq_map.drop(columns=['days','sequence_ID']).drop_duplicates()
 		
-	#allow us to detect and exclude permutatations that exactly reverse the label assignments
+	#allow us to detect and exclude permutations that exactly reverse the label assignments
 	base["reverse_condition"] = np.nan
 	for i in range(2):
 		ind = base[base.condition == condition_pair[i]].index
@@ -194,6 +196,7 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 		
 		if line == 'pDNA':
 			pdna = y
+			pdna["true_condition"] = pdna["condition"]
 			continue
 
 		stack[line] = []
@@ -204,19 +207,30 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 
 		for perm in perms:
 				stack[line].append(y.copy())
+				stack[line][-1]["true_condition"] = stack[line][-1]["condition"]
 				stack[line][-1]["condition"] = perm
 				stack[line][-1]["cell_line_name"] = line
 
 	min_unique_permutations = min(len(v) for v in stack.values())
 	out = []
 	for i in range(min_unique_permutations):
-		out.append(pd.concat([v[i] for v in stack.values()] + [pdna]))
-		
+		#inner merge is to incl. row for each day (in case replicate has data for multiple days)
+		#outer merge is to add back sequence ids for each row
+		out.append(
+			pd.merge(
+				pd.merge(
+					pd.concat([v[i] for v in stack.values()] + [pdna]), 
+					days_map
+				),
+				seq_map.rename(columns={'condition':'true_condition'}) 
+			)
+		) 
+
 	return [create_condition_sequence_map(v, condition_pair) for v in out]
 
 
 def check_condition_map(condition_map):
-	expected_columns = ['sequence_ID', 'cell_line_name', 'pDNA_batch', 'days', 'condition']
+	expected_columns = ['sequence_ID', 'cell_line_name', 'pDNA_batch', 'days', 'replicate', 'condition']
 	for key in condition_map.keys():
 		missing = sorted(set(expected_columns) - set(condition_map[key].columns))
 		if missing:
@@ -251,8 +265,9 @@ class ConditionComparison():
 			`readcounts` (`dict` of `pandas.DataFrame`): readcount matrices from the experiment.
 					See `model.Chronos`
 			`condition_map` (`dict` of `pandas.DataFrame`): Tables in the same format as `sequence_map`
-					for `model.Chronos`, but with the additional column `condition` which the comparator
-					will compare results between. `condition` can be any value that can be passed to `str`.
+					for `model.Chronos`, but with the additional columns `replicate` (e.g. A, B), and 
+					`condition`, which the comparator will compare results between. `condition` can be 
+					any value that can be passed to `str`.
 					Results will be reported separately per cell line.
 					If you wish to compare two cell lines, give them the same value in `cell_line_name`,
 					and different values for `condition`.
