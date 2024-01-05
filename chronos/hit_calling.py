@@ -5,6 +5,9 @@ from .model import Chronos, check_inputs
 from .reports import sum_collapse_dataframes
 from warnings import warn
 from itertools import permutations
+from scipy.stats import gaussian_kde, norm
+from scipy.interpolate import interp1d
+from scipy.signal import argrelextrema
 
 
 def cell_line_log_likelihood(model):
@@ -460,7 +463,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			).stack(),
 
 			 "permuted_gene_effect_in_%s_min" % condition_pair[1]: pd.DataFrame(
-			 	np.min(
+				np.min(
 					gene_effect_in_alt_permuted,
 					axis=0
 				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
@@ -474,7 +477,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			).stack(),
 
 			 "permuted_gene_effect_in_%s_max" % condition_pair[1]: pd.DataFrame(
-			 	np.max(
+				np.max(
 					gene_effect_in_alt_permuted,
 					axis=0
 				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
@@ -488,21 +491,21 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			).stack(),
 
 			 "permuted_gene_effect_in_%s_mean" % condition_pair[1]: pd.DataFrame(
-			 	np.mean(
+				np.mean(
 					gene_effect_in_alt_permuted,
 					axis=0
 				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
 			 ).stack(),
 
 			"permuted_difference_sd": pd.DataFrame(
-			 	np.std(
+				np.std(
 					gene_effect_difference_permuted,
 					axis=0
 				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
 			 ).stack(),
 
 			"permuted_difference_extreme": pd.DataFrame(
-			 	np.max(
+				np.max(
 					np.abs(gene_effect_difference_permuted),
 					axis=0
 				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
@@ -716,4 +719,214 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 				out[-1].reset_index(inplace=True)
 				out[-1].rename(columns={out[-1].columns[0]: "gene"})
 		return pd.concat(out, ignore_index=True)
+
+
+def smooth(x, sigma):
+    '''smooth with a gaussian kernel'''
+
+
+    kernel = np.exp(-.5 * np.arange(int(-4 * sigma), int(4 * sigma + 1), 1) ** 2 / sigma ** 2)
+    kernel = kernel / sum(kernel)
+    return np.convolve(x, kernel, 'same')
+
+
+### Infer class probabilities
+class MixFitOneUnknown:
+	'''
+	fit a 1D mixture model with a set of known functions using E-M optimization
+	'''
+	def __init__(self, densities, data, initial_lambdas=None,
+			initial_mu=None, initial_sigma=None):
+		'''
+		Parameters:
+			densities: iterable of normalized functions R^N -> P^N
+			data: 1D array of points
+			initial_lambdas: iterable with same length as densities giving initial guesses for size of each
+				component. Must sum to between 0 and 1. Must sum to 1
+			lambda_lock: if True, model will not update the mixing proportions of the components
+		'''
+		if initial_lambdas is None:
+			initial_lambdas = [1.0/len(densities) for d in densities]
+		if sum(pd.isnull(densities)) > 0:
+			e = 'Error: %i null values in data\n%r' %(sum(pd.isnull(densities)), data)
+			raise ValueError(e)
+		self.lambdas = np.array(initial_lambdas)
+		self.n = len(initial_lambdas)+1
+		self.densities = list(densities)
+		self.data = np.array(data)
+		assert sum(initial_lambdas) == 1, 'Invalid mixing sizes'
+		self.q = 1.0/(len(self.densities)) * np.ones((len(self.densities), len(self.data)))
+		self.p = np.stack([d(self.data) for d in densities])
+	
+	def gauss(self, x):
+		return norm.pdf(x, loc=self.mu, scale=self.sigma)
+	
+	def fit(self, tol=1e-7, maxit=1000, lambda_lock=False):
+		self.likelihood = self.get_likelihood()
+		for i in range(maxit):
+
+			#E step
+			for k in range(self.n-1):
+				self.q[k, :] = self.lambdas[k]*self.p[k, :]
+			if any(np.sum(self.q, axis=0) == 0):
+				loc = np.argwhere(np.sum(self.q, axis=0) == 0).ravel()
+				bad_points = self.data[loc]
+				e = 'All component densities invalid for indices %r\ndata there: %r\ndensities there: %r)' %(
+					loc, bad_points, [d(bad_points) for d in self.densities])
+				raise ValueError(e)
+			self.q /= np.sum(self.q, axis=0)
+
+			#M step
+			if not lambda_lock:
+				self.lambdas = np.mean(self.q, axis=1)
+				self.lambdas /= sum(self.lambdas)
+
+			new_likelihood = self.get_likelihood()
+			last_change = (new_likelihood - self.likelihood)/self.likelihood
+			self.likelihood = new_likelihood
+			if 0 <= last_change < tol:
+				print("Converged at likelihood %f with %i iterations" %(new_likelihood, i))
+				break
+		if i >= maxit - 1:
+			print("Reached max iterations %i with likelihood %f, last change %f" %(
+				maxit, self.likelihood, last_change))
+		
+	def get_likelihood(self):
+		out = np.mean(
+			np.sum(
+				self.q*np.log((self.p+1e-32)/(self.q+1e-32)),
+				axis=1
+			)
+		)
+
+		if np.isnan(out):
+			e = "Null cost. %i nulls and %i negatives in q values, %i nulls and %i negatives in densities,\
+%i nulls and %i negatives in p values\
+			\n%r\n%r" %(
+				np.sum(np.isnan(self.q)),
+				np.sum(self.q < 0),
+				np.sum(np.isnan(np.stack([d(self.data) for d in self.densities]))),
+				np.sum(np.stack([d(self.data) for d in self.densities]) < 0),
+				np.sum(np.isnan(self.p)),
+				np.sum(self.p < 0),
+				np.argwhere(np.isnan(self.p)),
+				self.p.shape
+				)
+			raise ValueError(e)
+		return out
+	
+	def full_density(self, points):
+		out = 0*points
+		for d,l in zip(self.densities, self.lambdas):
+			out += l*d(points)
+		return out
+	
+	def get_assignments(self, component):
+		'''get probability that each data point was generated by the given component (int)'''
+		return self.q[component]
+
+	def component_probability(self, points, component):
+		'''get probability that data at specified points belongs to the given component (int)'''
+		return self.lambdas[component] * self.densities[component](points) / sum([
+			l*d(points) for l, d in zip(self.lambdas, self.densities)
+			])
+
+
+class TailKernel:
+	'''Used to set points at left and right extremes to fixed values'''
+	def __init__(self,
+				lower_bound=None, lower_value=None, upper_bound=None, upper_value=None):
+		self.lower_bound = lower_bound
+		self.lower_value = lower_value
+		self.upper_bound = upper_bound
+		self.upper_value = upper_value
+
+	def apply(self, x, y):
+		if self.lower_bound is not None:
+			y[x < self.lower_bound] = self.lower_value
+		if self.upper_bound is not None:
+			y[x > self.upper_bound] =self.upper_value
+
+
+
+				
+
+def probability_2class(component0_points, component1_points, all_points,
+			   smoothing='scott', p_smoothing=.15,
+			   right_kernel_threshold=1, left_kernel_threshold=-3,
+			   maxit=500, lambda_lock=False, mixfit_kwargs={}, 
+			   kernel_kwargs=dict(lower_bound=-1.5, lower_value=1, upper_bound=.25, upper_value=0)):
+	'''
+	Estimates the distributions of component0_points and component1_points using a gaussian kernel,
+	then assigns each of all_points a probability of belonging to the component distribution. Note that
+	this is NOT a p-value: P(component1) = 1 - P(component0)
+	'''
+	#estimate density
+	estimates = [
+			gaussian_kde(component0_points, bw_method=smoothing),
+			gaussian_kde(component1_points, bw_method=smoothing)
+		]
+	points = np.arange(min(all_points) - 4*p_smoothing, max(all_points) + 4*p_smoothing, .01)
+	estimates = [e(points) for e in estimates]
+	
+	#this step copes with the fact that scipy's gaussian KDE often decays to true 0 in the far tails, leading to
+	#undefined behavior in the mixture model
+	if right_kernel_threshold is not None:
+		estimates[0][np.logical_and(points > right_kernel_threshold, estimates[0] <1e-16)] = 1e-16
+	if left_kernel_threshold is not None:
+		estimates[1][np.logical_and(points < left_kernel_threshold, estimates[1] <1e-16)] = 1e-16
+
+	#create density functions using interpolation (these are faster than calling KDE on points)
+	densities = [interp1d(points, e) for e in estimates]
+	
+	#infer probabilities
+	fitter = MixFitOneUnknown(densities, all_points, **mixfit_kwargs)
+	fitter.fit(maxit=maxit, lambda_lock=lambda_lock)
+
+	#generate smoothed probability function
+	p = fitter.component_probability(points, 1)
+	probability_kernel = TailKernel(**kernel_kwargs)
+	probability_kernel.apply(points, p)
+	p = smooth(p, int(100*p_smoothing))
+	d = interp1d(points, p)
+
+	#return probabilities
+	out = d(all_points)
+	out[out > 1] =  1
+	out[out < 0] = 0
+	return out
+
+
+def get_probability_dependent(gene_effect, negative_controls,  positive_controls, **kwargs):
+
+	def check_controls(controls, label):
+		missing = list(set(controls) - set(gene_effect.columns))
+		if missing:
+			warn("Not all %s found in the gene effect columns: %r" % (label, missing[:5]))
+		controls = sorted(set(controls) & set(gene_effect.columns))
+		if len(controls) < 10:
+			raise ValueError("Less than 10 (%i) %s found in gene effect" % (len(controls), label))
+		if len(controls) < 200:
+			warn("Less than 200 (%i) %s found in gene effect, inference may be low quality" % (len(controls), label))
+		return controls
+
+	positive_controls = check_controls(positive_controls, "positive controls")
+	negative_controls = check_controls(negative_controls, "negative controls")
+
+	# centers negative controls at 0. This is important for the tail kernels to behave correctly.
+	gene_effect = gene_effect - np.nanmean(gene_effect[negative_controls])
+
+	def row_probability(x):
+		return probability_2class(
+			x[negative_controls].dropna(), 
+			x[positive_controls].dropna(), 
+			x.dropna(), 
+			**kwargs
+		)
+
+	out = {}
+	for ind, row in gene_effect.iterrows():
+		out[ind] = row_probability(row)
+	return pd.DataFrame(out).T#.reindex(columns=gene_effect.columns).loc[gene_effect.index]
+
 

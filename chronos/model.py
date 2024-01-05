@@ -821,6 +821,8 @@ class Chronos(object):
 
 		self.median_timepoint_counts = self._summarize_timepoint(sequence_map, np.median)
 
+		self.median_guide_counts = self._get_median_guide_counts(self.unified_guide_map)
+
 		#set up the graph
 		self._initialize_graph(max_learning_rate, dtype)
 		#the libraries may cover different genes, so gene effect estimates for a cell line in one
@@ -940,6 +942,10 @@ class Chronos(object):
 				self.v_growth_rate,
 				self.v_library_effect
 				]
+		if self.median_guide_counts <= 2:
+			print("Two or fewer guides for most genes, guide efficacy will not be trained")
+			self.default_var_list.remove(self.v_guide_efficacy)
+
 		self._step = self.optimizer.minimize(self._full_cost, var_list=self.default_var_list)
 		self._ge_only_step = self.optimizer.minimize(self._full_cost, var_list=[self.v_mean_effect, self.v_residue])
 		self._loaded_model_step = self.optimizer.minimize(self._full_cost, var_list=[self.v_residue, 
@@ -1100,8 +1106,8 @@ class Chronos(object):
 		if len(duplicates):
 			raise ValueError("Inconsistent gene annotations seen for the same sgrna in different libraries.\n%r" % 
 				unified[unified.sgrna.isin(duplicates)].sort_values("sgrna"))
-		unified_guide_map = Chronos.make_map(unified.set_index('sgrna').loc[all_guides, 'gene'], 
-			all_guides, all_genes)
+		unified_guide_map = pd.DataFrame(Chronos.make_map(unified.set_index('sgrna').loc[all_guides, 'gene'], 
+			all_guides, all_genes))
 
 		return genes, all_guides, all_genes, intersecting_genes, guide_map, unified_guide_map, column_map
 
@@ -1191,6 +1197,9 @@ class Chronos(object):
 			out[key] = func(val.groupby("cell_line_name").days.agg(lambda v: len(v.unique())).drop('pDNA').values)
 		return out
 
+
+	def _get_median_guide_counts(self, unified_guide_map):
+		return unified_guide_map.groupby("labels_inner").labels_outer.nunique().median()
 
 
 	def _initialize_graph(self, max_learning_rate, dtype):
@@ -1402,7 +1411,7 @@ class Chronos(object):
 		with tf.compat.v1.name_scope("guide_efficacy"):
 			v_guide_efficacy = tf.Variable(
 				#last guide is dummy
-				np.random.normal(size=(1, self.nguides+1), scale=.01).astype(self.np_dtype),
+				np.random.normal(size=(1, self.nguides+1), scale=.001).astype(self.np_dtype),
 				name='base', dtype=dtype)
 			_guide_efficacy_mask_input = tf.compat.v1.placeholder(shape=(1, self.nguides+1), dtype=tf.bool, 
 				name="mask_input")
@@ -1738,12 +1747,23 @@ class Chronos(object):
 	def _get_full_cost(self, dtype):
 		print("building other regularizations")
 		with tf.compat.v1.name_scope('full_cost'):
-			self._L1_penalty = self.gene_effect_L1 * tf.square(tf.reduce_sum(input_tensor=self._combined_gene_effect)/self.mask_count,
-				name="L1_penalty") 
+
+			self._L1_penalty = self.gene_effect_L1 * tf.reduce_sum(
+				input_tensor=tf.abs(
+					tf.reduce_sum(
+						input_tensor=self._combined_gene_effect*self._gene_effect_mask, 
+						axis=1
+					)
+				) / self.mask_count,
+				name="L1_penalty"
+			) 
+
 			self._L2_penalty = self.gene_effect_L2 * tf.reduce_sum(input_tensor=tf.square(self._combined_gene_effect),
 				name="L2_penalty")/self.mask_count
+
 			self._hier_penalty = self.gene_effect_hierarchical * tf.reduce_sum(input_tensor=tf.square(self._true_residue),
 				name="hier_penalty")/self.mask_count
+
 			self._growth_reg_cost = -self.growth_rate_reg * 1.0/len(self.keys) * tf.add_n([
 							tf.reduce_mean( input_tensor=tf.math.log(tf.boolean_mask(tensor=v, mask=self._line_presence_boolean[key])) )
 							for key, v in self._growth_rate.items()
