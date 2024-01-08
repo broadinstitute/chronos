@@ -1,1 +1,0 @@
-{"guide_efficacy_reg": 0.01, "gene_effect_L1": 0.1, "gene_effect_L2": 0.0, "gene_effect_hierarchical": 0.1, "growth_rate_reg": 0.01, "offset_reg": 1.0, "gene_effect_smoothing": 1.5, "kernel_width": 50.0, "cell_efficacy_guide_quantile": 0.02, "library_batch_reg": 0.1, "cost": 0.20544432279985714, "full_cost": 0.22937221974349314}

@@ -1,5 +1,6 @@
 *.DS_store
 Data/Achilles_run/
+Data/Achilles_run_compare/
 Data/logs/
 Data/reports
 Data/DepMapParameters/
@@ -9,3 +10,4 @@ Data/DepMapParameters/
 build/
 dist/
 chronos/__pycache__
+
