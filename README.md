@@ -29,9 +29,7 @@ Chronos is competitive with or superior to the other CRISPR algorithms we tested
 
 ## Note on Mac M1 chips
 
-As of 2023/07/14, `pip` will not correctly install tensorflow on Macs with the M1 chip. You can try the instructions here: https://caffeinedev.medium.com/how-to-install-tensorflow-on-m1-mac-8e9b91d93706 but they appear to fail for python 3.10. Reversion to 3.8 led to success. Make sure you can import tensorflow in python without the kernel hanging before proceeding. 
-
-If you followed those instructions, you may find that running the vignette with multiple libraries could also cause the error "cannot assign a device for operation ReadVariableOp." Uninstalling tensorflow-metal will fix this error but may disable running on the GPU. But in general we do not recommend running Chronos on the GPU.
+As of 09/01/2023, `pip install tensorflow` should work on Macs with arm64.
 
 ## Installing Chronos
 
@@ -48,11 +46,11 @@ If you have jupyter notebook, you should run through `Vignette.ipynb`. This will
 
 To run Chronos, you need a minimum of three Pandas dataframes:
 
-1. A matrix of raw readcounts, where the columns are targeting sgRNAs, the rows are pDNA sequencing samples or replicate samples, and the entries are the number of reads of the given sgRNA in the given sample. Notice that in Chronos matrices, GUIDES and GENES are always COLUMNS and SAMPLES are always ROWS. Readcounts can have null values as long as no column or row is entirely null.
+1. _readcounts_: A matrix of raw readcounts, where the columns are targeting sgRNAs, the rows are pDNA sequencing samples or replicate samples, and the entries are the number of reads of the given sgRNA in the given sample. Notice that in Chronos matrices, GUIDES and GENES are always COLUMNS and SAMPLES are always ROWS. Readcounts can have null values as long as no column or row is entirely null.
 
-2. A table with at least two columns, `sgrna` and `gene`, mapping the sgRNAs to genes. Chronos will not accept sgRNAs that map to more than one gene. This is intentional. `sgrna` entries should match the columns in raw readcounts. `gene` can be in any format.
+2. _sequence_map_: A table with at least four columns, `sequence_ID`, `cell_line_name`, `pDNA_batch`, and `days`, mapping sequencing samples to cell lines and pDNA measurements. `sequence_ID` should match the row names of the raw readcounts. `days` is the number of days between infection and when the sample was collected, should be integer or float. It will be ignored for pDNA samples. `cell_line_name` MUST be "pDNA" for pDNA samples. if, instead of pDNA, you are sequencing your cells at a very early time point to get initial library abundance, treat these as pDNA samples. If you don't have either, Chronos may not be the right algorithm for your experiment. `pDNA_batch` is needed when your experiment combines samples that have different pDNA references (within the same library). This is the case for Achilles because the PCR primer strategy has changed several times during the course of the experiment. pDNA samples belonging to the same batch will be combined into a single reference. If you don't have pDNA batches, just fill this column some value, such as "batch1".
 
-3. A table with at least four columns, `sequence_ID`, `cell_line_name`, `pDNA_batch`, and `days`, mapping sequencing samples to cell lines and pDNA measurements. `sequence_ID` should match the row names of the raw readcounts. `days` is the number of days between infection and when the sample was collected, should be integer or float. It will be ignored for pDNA samples. `cell_line_name` MUST be "pDNA" for pDNA samples. if, instead of pDNA, you are sequencing your cells at a very early time point to get initial library abundance, treat these as pDNA samples. If you don't have either, Chronos may not be the right algorithm for your experiment. `pDNA_batch` is needed when your experiment combines samples that have different pDNA references (within the same library). This is the case for Achilles because the PCR primer strategy has changed several times during the course of the experiment. pDNA samples belonging to the same batch will be combined into a single reference. If you don't have pDNA batches, just fill this column some value, such as "batch1".
+3. _guide_gene_map_: A table with at least two columns, `sgrna` and `gene`, mapping the sgRNAs to genes. Chronos will not accept sgRNAs that map to more than one gene. This is intentional. `sgrna` entries should match the columns in raw readcounts. `gene` can be in any format.
 
 To benefit from improved normalization and allow Chronos to infer the overdispersion of screens, supplying a list or array of `negative_control_sgrnas` is also necessary. These are simply the sgRNAs which you believe should have no viability effect in any of your screens. It is much better to use cutting than noncutting controls, and as many as possible.
 
