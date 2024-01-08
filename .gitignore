@@ -10,4 +10,5 @@ Data/DepMapParameters/
 build/
 dist/
 chronos/__pycache__
+chronos/unimodal_density_estimate.py
 
