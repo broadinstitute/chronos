@@ -286,10 +286,6 @@ def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=
 									   index=repbatch.index, columns=repbatch.columns))
 
 	logged_reps = pd.concat(logged_reps, axis=0)
-	logged_reps += logged.loc[rep_ids, negative_control_sgrnas].median().median() \
-					- logged_reps.loc[:, negative_control_sgrnas].median().median()
-	logged_pdna += logged.loc[rep_ids, negative_control_sgrnas].median().median() \
-					- logged_pdna[negative_control_sgrnas].median().median()
 	
 	
 	assembled = pd.concat([logged_pdna, logged_reps], axis=0)
