@@ -25,12 +25,15 @@ def cell_line_log_likelihood(model):
 
 def empirical_pvalue(observed, null, direction=-1):
 	'''
-	get non-parametric pvalues given a null. Pvalues are calculated individually per column in the null
+	Returns an array or `pandas.Series` of non-parametric pvalues given a null. 
+	For a given observation in `observed`, `p = (n_null_more_extreme + 1) / (n_null + 1)`,
+	where n_null_more_extreme is the number of null observations equal or more extreme
+	that the observation and n_null is `len(null)`.
 	Parameters:
 		`observed` (1D array-like): observed values for the samples
 		`null` (1D array-like): values sampled from the null hypothesis
-		 `direction` (-1 or 1), which tail is being tested. -1 tests the hyothesis that observed values are less 
-			positive than would be expected by chance
+		`direction` (-1 or 1), which tail is being tested. -1 tests the hyothesis that 
+		the observed values are less positive than would be expected by chance
 	Returns:
 		numpy.ndarray or pandas.Series of pvalues
 	'''
@@ -746,19 +749,18 @@ def smooth(x, sigma):
 
 
 ### Infer class probabilities
-class MixFitOneUnknown:
+class MixFitEmpirical:
 	'''
 	fit a 1D mixture model with a set of known functions using E-M optimization
+	
 	'''
-	def __init__(self, densities, data, initial_lambdas=None,
-			initial_mu=None, initial_sigma=None):
+	def __init__(self, densities, data, initial_lambdas=None):
 		'''
 		Parameters:
-			densities: iterable of normalized functions R^N -> P^N
-			data: 1D array of points
-			initial_lambdas: iterable with same length as densities giving initial guesses for size of each
-				component. Must sum to between 0 and 1. Must sum to 1
-			lambda_lock: if True, model will not update the mixing proportions of the components
+			`densities`: iterable of normalized functions R^N -> P^N
+			`data`: 1D array of points
+			`initial_lambdas`: iterable with same length as densities giving initial guesses
+				for size of each component. Must sum to 1.
 		'''
 		if initial_lambdas is None:
 			initial_lambdas = [1.0/len(densities) for d in densities]
@@ -773,10 +775,22 @@ class MixFitOneUnknown:
 		self.q = 1.0/(len(self.densities)) * np.ones((len(self.densities), len(self.data)))
 		self.p = np.stack([d(self.data) for d in densities])
 	
+
 	def gauss(self, x):
 		return norm.pdf(x, loc=self.mu, scale=self.sigma)
+
 	
 	def fit(self, tol=1e-7, maxit=1000, lambda_lock=False):
+		'''
+		Maximize likelihood. 
+		Parameters:
+			`tol` (`float`): consider converged when the fractional increase in likelihood 
+				is less than this.
+			`maxit` (`int`): maximum iterations to attempt for convergence.
+			`lambda_lock` (`bool`): whether to update the total proportions
+				of the observations estimated to be generated from each of the distributions.
+				if `False`, will use the `initial_lambdas`. 
+		'''
 		self.likelihood = self.get_likelihood()
 		for i in range(maxit):
 
@@ -872,9 +886,9 @@ def probability_2class(component0_points, component1_points, all_points,
 			   maxit=500, lambda_lock=False, mixfit_kwargs={}, 
 			   kernel_kwargs=dict(lower_bound=-1.5, lower_value=1, upper_bound=.25, upper_value=0)):
 	'''
-	Estimates the distributions of component0_points and component1_points using a gaussian kernel,
-	then assigns each of all_points a probability of belonging to the component distribution. Note that
-	this is NOT a p-value: P(component1) = 1 - P(component0)
+	Estimates the distributions of component0_points and component1_points using a gaussian 
+	kernel, then assigns each of all_points a probability of belonging to the component 
+	distribution. Note that this is NOT a p-value: P(component1) = 1 - P(component0)
 	'''
 	#estimate density
 	estimates = [
@@ -895,7 +909,7 @@ def probability_2class(component0_points, component1_points, all_points,
 	densities = [interp1d(points, e) for e in estimates]
 	
 	#infer probabilities
-	fitter = MixFitOneUnknown(densities, all_points, **mixfit_kwargs)
+	fitter = MixFitEmpirical(densities, all_points, **mixfit_kwargs)
 	fitter.fit(maxit=maxit, lambda_lock=lambda_lock)
 
 	#generate smoothed probability function
@@ -912,36 +926,145 @@ def probability_2class(component0_points, component1_points, all_points,
 	return out
 
 
-def get_probability_dependent(gene_effect, negative_controls,  positive_controls, **kwargs):
+def _check_controls(control_cols, control_matrix, gene_effect, label):
+	var_name = '_'.join(label.split(' '))
+	if control_cols is None and control_matrix is None:
+		raise ValueError("One of `{0}` or `{0}_matrix` must be specified".format(var_name))
+	if not (control_cols is None or control_matrix is None):
+		raise ValueError("You can only specify one of `{0}` or `{0}_matrix` ".format(var_name))
 
-	def check_controls(controls, label):
-		missing = list(set(controls) - set(gene_effect.columns))
+	if control_matrix is None:
+		missing = list(set(control_cols) - set(gene_effect.columns))
 		if missing:
 			warn("Not all %s found in the gene effect columns: %r" % (label, missing[:5]))
-		controls = sorted(set(controls) & set(gene_effect.columns))
-		if len(controls) < 10:
-			raise ValueError("Less than 10 (%i) %s found in gene effect" % (len(controls), label))
-		if len(controls) < 200:
-			warn("Less than 200 (%i) %s found in gene effect, inference may be low quality" % (len(controls), label))
-		return controls
+		control_cols = sorted(set(control_cols) & set(gene_effect.columns))
+		if len(control_cols) < 10:
+			raise ValueError("Less than 10 (%i) %s found in gene effect" % (len(control_cols), label))
+		if len(control_cols) < 200:
+			warn("Less than 200 (%i) %s found in gene effect, inference may be low quality" % 
+				(len(control_cols), label))
+		control_matrix = pd.DataFrame(False, index=gene_effect.index, columns=gene_effect.columns)
+		control_matrix[control_cols] = True
 
-	positive_controls = check_controls(positive_controls, "positive controls")
-	negative_controls = check_controls(negative_controls, "negative controls")
+	missing = set(gene_effect.index) - set(control_matrix.index)
+	if len(missing) == len(gene_effect):
+		raise ValueError("The index of `gene_effect` does not match `%s_matrix`." % (
+			var_name))
+	if len(missing):
+		raise ValueError("Not all screens in `gene_effect` have entries in `%s_matrix`" % var_name)
+	if not len(set(control_matrix.columns) & set(gene_effect.columns)):
+		raise ValueError("None of the genes in `gene_effect` are in the columns of `%s_matrix`"
+			% (var_name))
+	control_matrix = control_matrix\
+		.loc[gene_effect.index]\
+		.reindex(columns=gene_effect.columns)\
+		.fillna(False)
+	if (control_matrix.sum(axis=1) < 200).any():
+		warn("Less than 200 %s in some screens, inference may be low quality" % label)
+	return control_matrix
+
+
+def get_probability_dependent(gene_effect, 
+	negative_controls=None, positive_controls=None, 
+	negative_control_matrix=None, positive_control_matrix=None,
+	**kwargs):
+	'''
+	Generates a matrix of the same dimensions as `gene_effect` where the values are probabilites
+	that the corresponding `gene_effect` value was drawn from the distribution of 
+	`positive_controls` rather than `negative_controls`.
+	Parameters:
+		`gene_effect` (`pandas.DataFrame`): Chronos gene effect estimates
+		`negative_controls` (iterable of `str` or `None`): the genes in `gene_effect` to treat as 
+			negative controls (null distribution). `negative_controls` or 
+			`negative_control_matrix` must be specified.
+		`positive_controls` (iterable of `str` or `None`): the genes in `gene_effect` to treat as
+			positive_controls (high confidence that loss leads to loss of viability).
+			One of `positive_controls` or `positive_control_matrix` must be specified.
+		`negative_control_matrix` (`pandas.DataFrame` or `None`): a matrix of boolean values
+			matching `gene_effect` where `True` indicates that that gene is a negative control
+			in the cell line in question. This is useful when the controls differ betweeen different
+			cell lines, such as when using unexpressed genes as the negative controls. 
+		`positive_control_matrix` (`pandas.DataFrame` or `None`): a matrix of boolean values
+			matching `gene_effect` where `True` indicates that that gene is a positive control
+			in the cell line in question.  
+		Other arguments passed to `probability_2class`
+	Returns:
+		`pandas.DataFrame` containing the probability estimates.
+	'''
+	
+
+	positive_control_matrix = _check_controls(positive_controls, positive_control_matrix,
+								gene_effect,  "positive controls")
+	negative_control_matrix = _check_controls(negative_controls, negative_control_matrix,
+								gene_effect,  "negative controls")
 
 	# centers negative controls at 0. This is important for the tail kernels to behave correctly.
-	gene_effect = gene_effect - np.nanmean(gene_effect[negative_controls])
+	gene_effect = gene_effect - np.nanmean(gene_effect.mask(~negative_control_matrix))
 
 	def row_probability(x):
 		return probability_2class(
-			x[negative_controls].dropna(), 
-			x[positive_controls].dropna(), 
+			x[negative_control_matrix.loc[x.name]].dropna(), 
+			x[positive_control_matrix.loc[x.name]].dropna(), 
 			x.dropna(), 
 			**kwargs
 		)
 
+	return pd.DataFrame({
+		ind: pd.Series(row_probability(row), index=row.dropna().index)
+		for ind, row in gene_effect.iterrows()
+	}).reindex(index=gene_effect.columns).T
+
+
+def get_fdr_from_probabilities(probabilities):
+	'''Computes the false discovery rates from the probability of dependency matrix 
+	`probabilities` and returns it as a matrix. The FDR for an observation in a given
+	cell line  is 1 - the mean probability of dependency for all observations
+	in that cell line with equal or more negative gene effect than the observation.
+	''' 
 	out = {}
-	for ind, row in gene_effect.iterrows():
-		out[ind] = row_probability(row)
-	return pd.DataFrame(out).T#.reindex(columns=gene_effect.columns).loc[gene_effect.index]
+	for ind, row in probabilities.iterrows():
+		row = row.sort_values(ascending=False)
+		out[ind] = pd.Series(
+			np.cumsum(1-row.fillna(0)) / np.cumsum(row.notnull()),
+			index=row.index
+		)
+	return pd.DataFrame(out).reindex(index=probabilities.columns).T
 
 
+def get_pvalue_dependent(gene_effect, negative_controls=None, negative_control_matrix=None):
+	'''
+	Generates a matrix of the same dimensions as `gene_effect` where the values are p-values
+	for the null hypothesis that the true corresponding `gene_effect` value represented no viability
+	effect against the alternative that there was loss of viability using `empirical_pvalue`.
+	Parameters:
+		`gene_effect` (`pandas.DataFrame`): Chronos gene effect estimates
+		`negative_controls` (iterable of `str` or `None`): the genes in `gene_effect` to treat as 
+			negative controls (null distribution). `negative_controls` or 
+			`negative_control_matrix` must be specified.
+		`negative_control_matrix` (`pandas.DataFrame` or `None`): a matrix of boolean values
+			matching `gene_effect` where `True` indicates that that gene is a negative control
+			in the cell line in question. This is useful when the controls differ betweeen different
+			cell lines, such as when using unexpressed genes as the negative controls. 
+	Returns:
+		`pandas.DataFrame` containing the p-value estimates.
+	'''
+	negative_control_matrix = _check_controls(negative_controls, negative_control_matrix,
+		gene_effect, "negative_controls")
+	return pd.DataFrame({
+		ind: empirical_pvalue(row, row[negative_control_matrix.loc[ind]])
+		for ind, row in gene_effect.iterrows()
+	}).T
+
+
+def get_fdr_from_pvalues(pvalues):
+	'''Computes the Benjamini-Hochberg false discovery rates from the p-value matrix 
+	and returns it as a matrix. FDRs are computed within individual cell lines (rows).
+	''' 
+	out = {}
+	for ind, row in pvalues.iterrows():
+		row = row.dropna()
+		out[ind] = pd.Series(
+			fdrcorrection(row, .05)[1],
+			index=row.index
+		)
+	return pd.DataFrame(out).reindex(index=pvalues.columns).T
