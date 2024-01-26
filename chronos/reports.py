@@ -129,22 +129,6 @@ def mean_collapse_dataframes(dfs):
 	numerator = numerator.mask(denominator==0)
 	denominator.replace(0, np.nan, inplace=True)
 	return numerator/denominator
-
-def sum_collapse_dataframes(dfs):
-	'''
-	Given an iterable of pandas DataFrames, returns a single dataframe
-	where each value is given by the sum of values for the same index/column
-	across the input DataFrames, filling NaNs with 0.
-	'''
-	numerator = None
-	for df in dfs:
-		if numerator is None:
-			numerator = df.fillna(0)
-		else:
-			numerator, df = numerator.align(df, join='outer')
-			numerator.fillna(0, inplace=True)
-			numerator += df.fillna(0).values
-	return numerator
 	
 
 def qc_compare_plot(plot_func, data, data_key, metrics, plot_width, plot_height, **kwargs):
