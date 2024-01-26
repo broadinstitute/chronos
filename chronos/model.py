@@ -286,10 +286,6 @@ def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=
 									   index=repbatch.index, columns=repbatch.columns))
 
 	logged_reps = pd.concat(logged_reps, axis=0)
-	logged_reps += logged.loc[rep_ids, negative_control_sgrnas].median().median() \
-					- logged_reps.loc[:, negative_control_sgrnas].median().median()
-	logged_pdna += logged.loc[rep_ids, negative_control_sgrnas].median().median() \
-					- logged_pdna[negative_control_sgrnas].median().median()
 	
 	
 	assembled = pd.concat([logged_pdna, logged_reps], axis=0)
@@ -298,7 +294,8 @@ def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=
 						columns=assembled.columns)
 
 
-def estimate_alpha(normalized_readcounts, negative_control_sgrnas, sequence_map, exclude_range=2.0):
+def estimate_alpha(normalized_readcounts, negative_control_sgrnas, sequence_map, exclude_range=2.0,
+	use_line_mean_as_reference=5):
 	'''
 	Estimates the overdispersion parameter alpha in the NB2 model: variance = mean * (1 + alpha * mean)
 	Alpha is estimated using an "auxiliary" OLS model. The true mean of negative controls is assumed to
@@ -316,6 +313,9 @@ def estimate_alpha(normalized_readcounts, negative_control_sgrnas, sequence_map,
 								cell lines for a given pDNA batch deviates from the pDNA abundance by more than `exclude_range` 
 								in log space, it will be excluded in that batch. Batches with fewer than 5 cell lines will not
 								be filtered by this value.
+		use_line_mean_as_reference (`int`): when at least this many lines are present for a pDNA batch, use the average
+								of late time point sequences for that batch as the expected counts instead of pDNA counts.
+								This gets around the problem of pDNA error.
 	Returns:
 		alphas (`pandas.Series`): a per-cell_line estimate of alpha.
 	'''
@@ -358,18 +358,18 @@ systematically over- or under-represented in the screens and excluded." % (
 	if (1-mask).sum(axis=1).min() < 100:
 		raise ValueError("Fewer than 100 negative control sgRNAs remaining in one or more \
 batches, too few to estimate overdispersion.")
-	# if there are less than five lines in a batch, we don't want to exclude negative
-	# controls on the basis of being offset. 
+	# if there are less than `use_line_mean_as_reference` lines in a batch, we don't want to 
+	# exclude negative controls on the basis of being offset. 
 	n_lines = sequence_map\
 				.query("cell_line_name != 'pDNA'")\
 				.groupby("pDNA_batch")\
 				.cell_line_name\
 				.nunique()
 
-	too_few = n_lines.loc[lambda x: x < 5].index
+	too_few = n_lines.loc[lambda x: x < use_line_mean_as_reference].index
 	mask.loc[too_few] = False
 	# for batches with enough cell lines, use replicate median as reference instead
-	for batch in n_lines.loc[lambda x: x >= 5].index:
+	for batch in n_lines.loc[lambda x: x >= use_line_mean_as_reference].index:
 		expected.loc[batch] = normalized_readcounts.loc[
 			rep_ids.loc[batch], 
 			negative_control_sgrnas
@@ -633,7 +633,8 @@ class Chronos(object):
 				 dtype=tf.double,
 				 verify_integrity=True, 
 				 log_dir=None,
-				 to_normalize_readcounts=True
+				 to_normalize_readcounts=True,
+				 use_line_mean_as_reference=5
 				):
 		'''
 		Parameters:
@@ -690,6 +691,7 @@ class Chronos(object):
 			to_normalize_readcounts (`bool`): If true, the readcounts will be normalized. if negative_control_sgRNAs are provided,
 								Chronos will normalize such that the median log reads of negative controls in each replicate match
 								the median in the pDNA batch. 
+			use_line_mean_as_reference (`int`): passed to `estimate_alpha`
 
 		Attributes:
 			Attributes beginning wit "v_" are tensorflow variables, and attributes beginning with _ are 
@@ -798,6 +800,7 @@ class Chronos(object):
 		self.kernel_width = float(kernel_width)
 		self.cell_efficacy_guide_quantile = float(cell_efficacy_guide_quantile)
 		self.library_batch_reg = float(library_batch_reg)
+		self.use_line_mean_as_reference = use_line_mean_as_reference
 
 		if not 0 < self.cell_efficacy_guide_quantile < .5:
 			raise ValueError("cell_efficacy_guide_quantile should be greater than 0 and less than 0.5")
@@ -808,11 +811,13 @@ class Chronos(object):
 		#the alpha parameter of an NB2 model for readcount noise, one value per sequence, dict by library
 		#behavior depends on whether negative_control_sgrnas are supplied for each library.
 		excess_variance = self._estimate_excess_variance(
-			excess_variance, readcounts, negative_control_sgrnas, sequence_map
+			excess_variance, readcounts, negative_control_sgrnas, sequence_map, use_line_mean_as_reference
 		)
 		self._excess_variance = self._get_excess_variance_tf(excess_variance)
 
 		self.median_timepoint_counts = self._summarize_timepoint(sequence_map, np.median)
+
+		self.median_guide_counts = self._get_median_guide_counts(self.unified_guide_map)
 
 		#set up the graph
 		self._initialize_graph(max_learning_rate, dtype)
@@ -891,6 +896,9 @@ class Chronos(object):
 		# this is normalized to have sum 1, then multiplied by _pdna_scale to get the absolute expected reads.
 		self._predicted_readcounts_unscaled, self._predicted_readcounts = self._get_abundance_estimates(self._t0, self._change)
 
+		init_op = tf.compat.v1.global_variables_initializer()
+		print('initializing precost variables')
+		self.sess.run(init_op)
 
 		#####################################    C  O  S  T    #########################################
 
@@ -902,8 +910,10 @@ class Chronos(object):
 
 		self._t0_cost = self._get_t0_regularization(self._t0_offset)
 			
-		self._cost_presum, self._cost, self._scale = self._get_nb2_cost(self._excess_variance, self._predicted_readcounts, 
-			self._normalized_readcounts, self._mask, dtype)
+		self._cost_presum, self._cost_constant, self._cost, self._scale = self._get_nb2_cost(
+			self._excess_variance, self._predicted_readcounts, 
+			self._normalized_readcounts, self._mask, dtype
+		)
 
 		self._library_means, self._library_batch_cost = self._get_library_batch_reg(
 			self._true_residue, self.library_batch_reg, dtype
@@ -928,6 +938,10 @@ class Chronos(object):
 				self.v_growth_rate,
 				self.v_library_effect
 				]
+		if self.median_guide_counts <= 2:
+			print("Two or fewer guides for most genes, guide efficacy will not be trained")
+			self.default_var_list.remove(self.v_guide_efficacy)
+
 		self._step = self.optimizer.minimize(self._full_cost, var_list=self.default_var_list)
 		self._ge_only_step = self.optimizer.minimize(self._full_cost, var_list=[self.v_mean_effect, self.v_residue])
 		self._loaded_model_step = self.optimizer.minimize(self._full_cost, var_list=[self.v_residue, 
@@ -943,7 +957,7 @@ class Chronos(object):
 			self.writer = tf.compat.v1.summary.FileWriter(log_dir, self.sess.graph)
 		
 		init_op = tf.compat.v1.global_variables_initializer()
-		print('initializing variables')
+		print('initializing rest of graph')
 		self.sess.run(init_op)
 
 		if scale_cost:
@@ -1088,8 +1102,8 @@ class Chronos(object):
 		if len(duplicates):
 			raise ValueError("Inconsistent gene annotations seen for the same sgrna in different libraries.\n%r" % 
 				unified[unified.sgrna.isin(duplicates)].sort_values("sgrna"))
-		unified_guide_map = Chronos.make_map(unified.set_index('sgrna').loc[all_guides, 'gene'], 
-			all_guides, all_genes)
+		unified_guide_map = pd.DataFrame(Chronos.make_map(unified.set_index('sgrna').loc[all_guides, 'gene'], 
+			all_guides, all_genes))
 
 		return genes, all_guides, all_genes, intersecting_genes, guide_map, unified_guide_map, column_map
 
@@ -1138,7 +1152,8 @@ class Chronos(object):
 ##################    A  S  S  I  G  N       C  O  N  S  T  A  N  T  S   #######################
 
 
-	def _estimate_excess_variance(self, excess_variance, readcounts, negative_control_sgrnas, sequence_map):
+	def _estimate_excess_variance(self, excess_variance, readcounts, negative_control_sgrnas, sequence_map,
+			use_line_mean_as_reference):
 		print('Estimating or aligning variances')
 		if not isinstance(excess_variance, dict):
 			prior_variance = excess_variance
@@ -1147,7 +1162,8 @@ class Chronos(object):
 			if not (negative_control_sgrnas.get(key) is None) and not key in excess_variance:
 				print('\tEstimating excess variance (alpha) for %s' % key)
 				excess_variance[key] = estimate_alpha(
-						readcounts[key], negative_control_sgrnas[key], sequence_map[key]
+						readcounts[key], negative_control_sgrnas[key], sequence_map[key],
+						use_line_mean_as_reference=use_line_mean_as_reference
 					)[self.index_map[key]]
 			elif not key in excess_variance:
 				excess_variance[key] = pd.Series(prior_variance, index=self.index_map[key])
@@ -1177,6 +1193,9 @@ class Chronos(object):
 			out[key] = func(val.groupby("cell_line_name").days.agg(lambda v: len(v.unique())).drop('pDNA').values)
 		return out
 
+
+	def _get_median_guide_counts(self, unified_guide_map):
+		return unified_guide_map.groupby("labels_inner").labels_outer.nunique().median()
 
 
 	def _initialize_graph(self, max_learning_rate, dtype):
@@ -1388,7 +1407,7 @@ class Chronos(object):
 		with tf.compat.v1.name_scope("guide_efficacy"):
 			v_guide_efficacy = tf.Variable(
 				#last guide is dummy
-				np.random.normal(size=(1, self.nguides+1), scale=.01).astype(self.np_dtype),
+				np.random.normal(size=(1, self.nguides+1), scale=.001).astype(self.np_dtype),
 				name='base', dtype=dtype)
 			_guide_efficacy_mask_input = tf.compat.v1.placeholder(shape=(1, self.nguides+1), dtype=tf.bool, 
 				name="mask_input")
@@ -1681,36 +1700,66 @@ class Chronos(object):
 		with tf.compat.v1.name_scope('cost'):
 			# the NB2 cost: (yi + 1/alpha) * ln(1 + alpha mu_i) - yi ln(alpha mu_i)
 			# modified with constants and -mu_i - which makes it become the multinomial cost in the limit alpha -> 0
-			_cost_presum = {key: 
-									(
+			_cost_presum = {key:
+				(
 										((_normalized_readcounts[key]+1e-6) + 1./_excess_variance[key]) * tf.math.log(
-											(1 + _excess_variance[key] * (_predicted_readcounts[key] + 1e-6)) /
-											(1 + _excess_variance[key] * (_normalized_readcounts[key] + 1e-6))
-									) +
+											1 + _excess_variance[key] * (_predicted_readcounts[key] + 1e-6)
+									) -
 										(_normalized_readcounts[key]+1e-6) * tf.math.log(
-											(_normalized_readcounts[key] + 1e-6) / (_predicted_readcounts[key] + 1e-6) 
+											(_excess_variance[key] * _predicted_readcounts[key] + 1e-6)
 										)
 									)
 								for key in self.keys}
 
+			readcounts = self.normalized_readcounts
+			ev = self.excess_variance
+			ev = {key: ev[key].loc[readcounts[key].index].values.reshape((-1, 1))
+				for key in self.keys
+			}
+			_cost_constant = {key: tf.constant(np.nansum(
+									
+										((readcounts[key].values+1e-6) + 1./ev[key])\
+										 * np.log(
+											(1 + ev[key] * (readcounts[key].values + 1e-6))
+									) -
+										(readcounts[key].values+1e-6) * np.log(
+											ev[key]*readcounts[key].values + 1e-6 
+										)
+									))
+									 for key in self.keys}
+
 			_scale = tf.compat.v1.placeholder(dtype=dtype, shape=(), name='scale')
-			_cost =  _scale/len(self.keys) * tf.add_n([tf.reduce_sum(input_tensor=tf.boolean_mask(tensor=v, mask=_mask[key]))
+			_cost =  _scale/len(self.keys) * (
+				tf.add_n([tf.reduce_sum(input_tensor=tf.boolean_mask(tensor=v, mask=_mask[key]))
 													 for key, v in _cost_presum.items()]
 						)
+				- tf.add_n(_cost_constant.values())
+			)
 
 			tf.compat.v1.summary.scalar("unregularized_cost", _cost)
-			return _cost_presum, _cost, _scale
+			return _cost_presum, _cost_constant, _cost, _scale
 
 
 	def _get_full_cost(self, dtype):
 		print("building other regularizations")
 		with tf.compat.v1.name_scope('full_cost'):
-			self._L1_penalty = self.gene_effect_L1 * tf.square(tf.reduce_sum(input_tensor=self._combined_gene_effect)/self.mask_count,
-				name="L1_penalty") 
+
+			self._L1_penalty = self.gene_effect_L1 * tf.reduce_sum(
+				input_tensor=tf.abs(
+					tf.reduce_sum(
+						input_tensor=self._combined_gene_effect*self._gene_effect_mask, 
+						axis=1
+					)
+				) / self.mask_count,
+				name="L1_penalty"
+			) 
+
 			self._L2_penalty = self.gene_effect_L2 * tf.reduce_sum(input_tensor=tf.square(self._combined_gene_effect),
 				name="L2_penalty")/self.mask_count
+
 			self._hier_penalty = self.gene_effect_hierarchical * tf.reduce_sum(input_tensor=tf.square(self._true_residue),
 				name="hier_penalty")/self.mask_count
+
 			self._growth_reg_cost = -self.growth_rate_reg * 1.0/len(self.keys) * tf.add_n([
 							tf.reduce_mean( input_tensor=tf.math.log(tf.boolean_mask(tensor=v, mask=self._line_presence_boolean[key])) )
 							for key, v in self._growth_rate.items()
@@ -2426,7 +2475,6 @@ your data" % missing
 			)
 			for key in self.keys
 		}
-
 
 
 	@property
