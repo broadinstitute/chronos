@@ -1016,7 +1016,7 @@ def get_probability_dependent(gene_effect,
 
 
 def get_fdr_from_probabilities(probabilities):
-	'''Computes the false discovery rates from the probability of dependency matrix 
+	'''Computes the (Bayesian) false discovery rates from the probability of dependency matrix 
 	`probabilities` and returns it as a matrix. The FDR for an observation in a given
 	cell line  is 1 - the mean probability of dependency for all observations
 	in that cell line with equal or more negative gene effect than the observation.
@@ -1057,8 +1057,9 @@ def get_pvalue_dependent(gene_effect, negative_controls=None, negative_control_m
 
 
 def get_fdr_from_pvalues(pvalues):
-	'''Computes the Benjamini-Hochberg false discovery rates from the p-value matrix 
-	and returns it as a matrix. FDRs are computed within individual cell lines (rows).
+	'''Computes the Benjamini-Hochberg corrected p-values (frequentist false discovery rates)
+	from the p-value matrix and returns it as a matrix. 
+	FDRs are computed within individual cell lines (rows).
 	''' 
 	out = {}
 	for ind, row in pvalues.iterrows():

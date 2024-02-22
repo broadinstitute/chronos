@@ -248,7 +248,10 @@ def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=
 				readcounts.mean().mean()*(
 				readcounts.T / 2.0**(np.log2(readcounts+1).T.apply(venter_mode))
 			).T)
-	
+	if not len(negative_control_sgrnas):
+		raise ValueError("set of negative_control_sgrnas is empty")
+	if not len(set(negative_control_sgrnas) & set(readcounts.columns)):
+		raise RuntimeError("None of the negative control sgrnas were found in the columns of readcounts")
 	# Else, negative controls present:
 	if len(set(negative_control_sgrnas) - set(readcounts.columns)):
 		raise ValueError(

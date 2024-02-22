@@ -38,6 +38,7 @@ def lowess_trend(x, y, frac=.25, max_points=300, min_points=20, delta_frac=.005,
 	'''
 	frac = min(max_points/len(x), frac)
 	frac = max(frac, min_points/len(x))
+	frac = np.clip(frac, 0, 1)
 	rng = x.max() - x.min()
 	delta = min(delta_frac * rng, 50/len(x)*rng)
 	delta = min(delta, rng)
