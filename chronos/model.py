@@ -1838,7 +1838,7 @@ class Chronos(object):
 		)
 
 
-	def cell_efficacy_estimate(self, fold_change, sequence_map, last_reps, key, cell_efficacy_guide_quantile=.01):
+	def cell_efficacy_estimate(self, fold_change, sequence_map, last_reps, cell_efficacy_guide_quantile=.01):
 		'''
 		Estimate the maximum depletion possible in cell lines as the lowest X percentile guide fold-change in
 		the last timepoint measured. Multiple replicates for a cell line at the same last timepoint are median-collapsed
