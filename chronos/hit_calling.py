@@ -55,6 +55,11 @@ def empirical_pvalue(observed, null, direction=-1):
 	return pvals
 
 
+################################################################
+# C O M P A R E    C O N D I T I O N S
+################################################################
+
+
 def get_difference_significance(observed, null, tail):
 	'''
 	Combines effect size, p-value, and FDR in one dataframe
@@ -314,7 +319,8 @@ every map.")
 
 
 	def compare_conditions(self, condition_pair=None, comparison_effect="gene_effect",
-		comparison_statistic=None, tail="both", n_readcount_total_bins=4, allow_reversed_permutations=None,
+		comparison_statistic=None, tail="both", gene_readcount_total_bin_quantiles=[0.05, .2], 
+		allow_reversed_permutations=None,
 			max_null_iterations=20, 
 				**kwargs):
 		'''
@@ -530,11 +536,6 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			 ).stack()
 
 		}
-		for key, v in gene_effect_annotations.items():
-			print(key)
-			print(v[:3])
-			print(v.shape)
-			print()
 		gene_effect_annotations = pd.DataFrame(gene_effect_annotations).reset_index()
 		gene_effect_annotations.rename(columns={
 			gene_effect_annotations.columns[0]: "cell_line_name",
@@ -543,15 +544,16 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 
 		print("calculating empirical significance")
-		statistics = self.get_significance_by_readcount_bin(
+		significance = self.get_significance_by_readcount_bin(
 			self.retained_readcounts, self.distinguished_map,
 			self.compared_lines,
 			self.observed_statistic, self.permuted_statistics,
-			tail, n_readcount_total_bins
+			tail, gene_readcount_total_bin_quantiles
 		)
 
-		return gene_effect_annotations.merge(statistics, on=["cell_line_name", "gene"],
-			how="outer")
+		return gene_effect_annotations\
+			.merge(significance, on=["cell_line_name", "gene"], how="outer")
+
 
 
 
@@ -679,7 +681,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 	def get_significance_by_readcount_bin(self, retained_readcounts,
 		distinguished_map, compared_lines, observed_statistic, permuted_statistics, 
-			tail, nbins=10,  additional_annotations={}
+			tail, gene_readcount_total_bin_quantiles,  additional_annotations={}
 		):
 
 		readcount_gene_totals = sum_collapse_dataframes([
@@ -690,19 +692,25 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			for key in self.keys
 		])
 
-		bins = readcount_gene_totals.quantile(np.linspace(0, 1.0, nbins+1))
+		bins = readcount_gene_totals.quantile([0] + gene_readcount_total_bin_quantiles + [1])
 		bins[0] = 0
 		bins[1.0] *= 1.05
 		bins = pd.cut(readcount_gene_totals, bins)
 		out = []
+		bin_assignments = []
 
 		for line in compared_lines:
 			if line == 'pDNA':
 				continue
 			for bin in sorted(bins.unique()):
 				genes = bins.loc[lambda x: x==bin].index
-
 				null = permuted_statistics.loc[line, genes]
+
+				if len(genes) < 100:
+					warn("Only %i genes in one of your bins. This will limit the minimum achievable p-value to \
+%1.1E. If you have a sub-genome library, considering changing `gene_readcount_total_bin_quantiles` so there are \
+more genes in each bin." % (len(genes), 1/(len(null)+1)))
+
 				if len(null.shape) > 1:
 					null_mean = null.mean(axis=0)
 					null_max = null.max(axis=0)
@@ -725,6 +733,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 				out[-1]["permuted_mean_statistic"] = null_mean
 				out[-1]["permuted_min_statistic"] = null_min
 				out[-1]["permuted_max_statistic"] = null_max
+				out[-1]["total_readcount_bin"] = bin
 
 				for key, val in additional_annotations:
 					if isinstance(val, pd.Series):
@@ -737,6 +746,11 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 				out[-1].reset_index(inplace=True)
 				out[-1].rename(columns={out[-1].columns[0]: "gene"})
 		return pd.concat(out, ignore_index=True)
+
+
+################################################################
+# P R O B A B I L I T I E S
+################################################################
 
 
 def smooth(x, sigma):
