@@ -796,7 +796,8 @@ class Chronos(object):
 		self.guide_efficacy_reg = float(guide_efficacy_reg)
 		self.gene_effect_L1 = float(gene_effect_L1)
 		self.gene_effect_L2 = float(gene_effect_L2)
-		self.gene_effect_hierarchical = float(gene_effect_hierarchical)
+		self._private_gene_effect_hierarchical = float(gene_effect_hierarchical)
+		self._gene_effect_hierarchical = tf.compat.v1.placeholder(dtype, shape=())
 		self.growth_rate_reg = float(growth_rate_reg)
 		self.offset_reg = float(offset_reg)
 		self.gene_effect_smoothing = float(gene_effect_smoothing)
@@ -874,9 +875,9 @@ class Chronos(object):
 		# _true_residue is this deviation after constraining v_residue to have mean 0. 
 		# _combined_gene_effect is the sum of v_mean_effect and _true_residue. This is the tensor 
 		# accessed by the attribute Chronos.gene_effect.
-		(self.v_mean_effect, self.v_residue, self._residue, self._true_residue, self._combined_gene_effect,
-			self.v_library_effect, self._library_effect
-			) = self._get_tf_gene_effect(dtype)
+		(self.v_mean_effect, self.v_residue, self._residue, self._true_residue, 
+			self._combined_gene_effect, self.v_library_effect, self._library_effect
+		) = self._get_tf_gene_effect(dtype)
 
 
 		#############################    C  O  R  E      M  O  D  E  L    ##############################
@@ -1205,7 +1206,10 @@ class Chronos(object):
 		print('initializing graph')
 		self.sess = tf.compat.v1.Session()
 		self._learning_rate = tf.compat.v1.placeholder(shape=tuple(), dtype=dtype)
-		self.run_dict = {self._learning_rate: max_learning_rate}
+		self.run_dict = {
+			self._learning_rate: max_learning_rate, 
+			self._gene_effect_hierarchical: self._private_gene_effect_hierarchical
+		}
 		self.max_learning_rate = max_learning_rate
 		self.persistent_handles = set([])
 
@@ -1527,8 +1531,12 @@ class Chronos(object):
 				_library_effect = {key: v - _library_effect_mean for key, v in _library_effect_indicated.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
+
 		print("built core gene effect: %i cell lines by %i genes" %tuple(_combined_gene_effect.get_shape().as_list()))
-		return v_mean_effect, v_residue, _residue, _true_residue, _combined_gene_effect, v_library_effect, _library_effect
+
+
+		return v_mean_effect, v_residue, _residue, _true_residue, _combined_gene_effect, \
+				v_library_effect, _library_effect
 
 
 #############################    C  O  R  E      M  O  D  E  L    ##############################
@@ -1760,7 +1768,7 @@ class Chronos(object):
 			self._L2_penalty = self.gene_effect_L2 * tf.reduce_sum(input_tensor=tf.square(self._combined_gene_effect),
 				name="L2_penalty")/self.mask_count
 
-			self._hier_penalty = self.gene_effect_hierarchical * tf.reduce_sum(input_tensor=tf.square(self._true_residue),
+			self._hier_penalty = self._gene_effect_hierarchical * tf.reduce_sum(input_tensor=tf.square(self._true_residue),
 				name="hier_penalty")/self.mask_count
 
 			self._growth_reg_cost = -self.growth_rate_reg * 1.0/len(self.keys) * tf.add_n([
@@ -2518,6 +2526,15 @@ your data" % missing
 		residue = pd.DataFrame(de.values - means).fillna(0).values
 		self.sess.run(self.v_mean_effect.assign(means))
 		self.sess.run(self.v_residue.assign(residue))
+
+
+	@property
+	def gene_effect_hierarchical(self):
+		return self.run_dict[self._gene_effect_hierarchical]
+
+	@gene_effect_hierarchical.setter
+	def gene_effect_hierarchical(self, desired_gene_effect_hierarchical):
+		self.run_dict[self._gene_effect_hierarchical] = desired_gene_effect_hierarchical
 		
 
 	@property

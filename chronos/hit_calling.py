@@ -101,7 +101,8 @@ def filter_sequence_map_by_condition(condition_map, condition_pair=None):
 		raise ValueError("can only compare two conditions. If `condition_pair` is not passed, \
 the 'condition' column of `condition_map` must have exactly two unique values for non-pDNA entries.")
 	if set(condition_pair) - set(out.condition):
-		raise ValueError("one or more entries in `condition_pair` %r not present in `condition_map.condition`" % condition_pair)
+		raise ValueError("one or more entries in `condition_pair` %r not present in `condition_map.condition`" 
+			% list(condition_pair))
 
 	condition_counts = out\
 					.query("condition in %r" % list(condition_pair))\
@@ -269,7 +270,10 @@ class ConditionComparison():
 			"likelihood": get_difference_distinguished
 	}
 
-	def __init__(self, readcounts, condition_map, guide_gene_map, **kwargs):
+	def __init__(self, readcounts, condition_map, guide_gene_map, gene_effect_hierarchical=None,
+		maximum_gene_effect_hierarchical=4, maximum_std_ratio=1.1, default_gene_effect_hierarchical_start=.5,
+		readcount_quantile=.1,
+		**kwargs):
 		'''
 		Initialize the comparator.
 		Parameters:
@@ -292,7 +296,14 @@ class ConditionComparison():
 		self.guide_gene_map = guide_gene_map
 		self.kwargs = kwargs
 		self.keys = sorted(self.readcounts.keys())
-
+		if gene_effect_hierarchical is not None:
+			warn("Setting a fixed value for `gene_effect_hierarchical` can lead to optimistic p-values for genes with \
+few reads, such as strong essentials. We recommend leaving this as `None` to allow Chronos to choose the optimal value.")
+		self.gene_effect_hierarchical = gene_effect_hierarchical
+		self.maximum_gene_effect_hierarchical = maximum_gene_effect_hierarchical
+		self.maximum_std_ratio = maximum_std_ratio
+		self.default_gene_effect_hierarchical_start = default_gene_effect_hierarchical_start
+		self.readcount_quantile = readcount_quantile
 
 	def _check_condition_pair(self,  condition_pair):
 		if condition_pair is None:
@@ -413,17 +424,26 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 		condition_pair = self._check_condition_pair(condition_pair)
 
-		print("training model with no condition distincions\n")
-		self.nondistinguished_map, self.retained_readcounts,\
-			 self.nondistinguished_result, nondistinguished_gene_effect = self.get_nondistinguished_results(
-			condition_pair, comparison_effect, **kwargs
+		self.nondistinguished_map = {key: filter_sequence_map_by_condition(
+			self.condition_map[key], condition_pair)
+			for key in self.keys
+		}
+		self.retained_readcounts = {
+			key:self.readcounts[key].loc[nondistinguished_map[key].sequence_ID]
+			for key in self.keys
+		}
+		self.compared_lines = list(self.nondistinguished_map.index)
+		self.compared_lines.drop("pDNA")
+
+		self.readcount_gene_totals = self.get_readcount_gene_totals(
+			self.retained_readcounts, self.condition_map, self.guide_gene_map
 		)
-		self.compared_lines = self.nondistinguished_result.index
 
 		print("training model with conditions distinguished")
 		self.distinguished_map, self.distinguished_result, \
 			distinguished_gene_effect = self.get_distinguished_results(
-			self.nondistinguished_map, condition_pair, comparison_effect, **kwargs
+			self.nondistinguished_map, condition_pair, comparison_effect, 
+			readcount_gene_totals, **kwargs
 		)
 
 		print("training model with permuted conditions")
@@ -555,6 +575,16 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			.merge(significance, on=["cell_line_name", "gene"], how="outer")
 
 
+	def get_readcount_gene_totals(self, retained_readcounts, condition_map, guide_gene_map):
+		readcount_gene_totals = sum_collapse_dataframes([
+			retained_readcounts[key]\
+						.loc[condition_map[key].query("cell_line_name != 'pDNA'").sequence_ID]\
+						.groupby(guide_gene_map[key].set_index("sgrna")["gene"], axis=1)\
+						.sum()\
+						.median(axis=0)
+			for key in self.keys
+		])
+		return readcount_gene_totals
 
 
 	def get_nondistinguished_results(self, condition_pair,
@@ -586,24 +616,58 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 
 	def get_distinguished_results(self, nondistinguished_map, condition_pair,
-			comparison_effect, **kwargs
+			comparison_effect, readcount_gene_totals, **kwargs
 		):
+
+		bottom_genes = readcount_gene_totals.index[
+		readcount_gene_totals < readcount_gene_totals.quantile(
+			self.readcount_quantile
+			)
+		]
 
 		distinguished_map = {key:
 			create_condition_sequence_map(nondistinguished_map[key], condition_pair)
 			for key in self.keys}
+
+		gene_effect_hierarchical = self.gene_effect_hierarchical
+		if gene_effect_hierarchical is None:
+			gene_effect_hierarchical = self.default_gene_effect_hierarchical_start
+
 		distinguished_model = Chronos(
 			readcounts=self.retained_readcounts,
 			sequence_map=distinguished_map,
 			guide_gene_map=self.guide_gene_map,
 			 use_line_mean_as_reference=np.inf,
+			 gene_effect_hierarchical=gene_effect_hierarchical,
 			**self.kwargs
 		)
 		distinguished_model.train(**kwargs)
 
+		if self.gene_effect_hierarchical is None:
+			gene_effect = distinguished_model.gene_effect
+
+			def get_bottom_std_ratio(gene_effect):
+				return gene_effect[bottom_genes].std().median()/gene_effect.std().median()
+
+			bottom_std_ratio = get_bottom_std_ratio(gene_effect)
+			print("Ratio of median SD of gene effect for genes in the bottom %1.3f%% of total readcounts to \
+median SD of all genes: %1.2f" % (self.readcount_quantile, bottom_std_ratio))
+
+			while \
+					bottom_std_ratio > self.maximum_std_ratio \
+					and distinguished_model.gene_effect_hierarchical < self.maximum_gene_effect_hierarchical \
+				:
+
+				print("\t setting gene_effect_hierarchical to %1.2f" % (distinguished_model.gene_effect_hierarchical*2))
+				distinguished_model.gene_effect_hierarchical *= 2
+				distinguished_model.train(51)
+				gene_effect = distinguished_model.gene_effect
+				bottom_std_ratio = get_bottom_std_ratio(gene_effect)
+
 		distinguished_result = comparison_effect(distinguished_model)
 		distinguished_gene_effect = distinguished_model.gene_effect
 		#del distinguished_model
+		self.gene_effect_hierarchical = distinguished_model.gene_effect_hierarchical
 		self.distinguished_model = distinguished_model
 
 		return distinguished_map, distinguished_result, distinguished_gene_effect
@@ -630,6 +694,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 								 sequence_map=permuted_map,
 								 guide_gene_map=self.guide_gene_map,
 								  use_line_mean_as_reference=np.inf,
+								  gene_effect_hierarchical=self.gene_effect_hierarchical,
 								**self.kwargs
 								)
 			permuted_model.train(**kwargs)
