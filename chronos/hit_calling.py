@@ -443,7 +443,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 		self.distinguished_map, self.distinguished_result, \
 			distinguished_gene_effect = self.get_distinguished_results(
 			self.nondistinguished_map, condition_pair, comparison_effect, 
-			readcount_gene_totals, **kwargs
+			self.readcount_gene_totals, **kwargs
 		)
 
 		print("training model with permuted conditions")
