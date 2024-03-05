@@ -61,8 +61,18 @@ def change_in_likelihood(model, distinguished_condition_map, condition_pair):
 	return likelihood_baseline - likelihood_reversed
 
 
-def get_gene_effect(model, *args):
-	return model.gene_effect
+def change_in_gene_effect(model, distinguished_condition_map, condition_pair):
+	'''get the differences in gene effect for the same lines in the first vs second condition'''
+	ge = model.gene_effect
+	# get unique lines allowing for someone deciding to put "__in__" in their base cell line name
+	all_lines = set(['__in__'.join(s.split('__in__')[:-1]) for s in ge.index])
+	out = {
+		line: ge.loc["%s__in__%s" % (line, condition_pair[0])]
+			- ge.loc["%s__in__%s" % (line, condition_pair[1])]
+		for line in all_lines
+	}
+	return pd.DataFrame(out).T
+
 
 
 def empirical_pvalue(observed, null, direction=-1):
@@ -120,10 +130,6 @@ def get_difference_significance(observed, null, tail):
 
 	fdr = fdrcorrection(pvals, .05)[1]
 	return pd.DataFrame({"observed_statistic": observed, "pval": pvals, "FDR": fdr})
-
-
-def get_difference_between_conditions(baseline, alt):
-	return alt - baseline
 
 
 def filter_sequence_map_by_condition(condition_map, condition_pair=None):
@@ -300,12 +306,8 @@ class ConditionComparison():
 	the statistics is `compare_conditions`.
 	'''
 	comparison_effect_dict = {
-			"gene_effect": get_gene_effect,
+			"gene_effect": change_in_gene_effect,
 			"likelihood": change_in_likelihood
-	}
-	comparison_statistic_dict = {
-			"gene_effect": get_difference_between_conditions,
-			"likelihood": get_difference_between_conditions,
 	}
 
 	def __init__(self, readcounts, condition_map, guide_gene_map, **kwargs):
@@ -357,7 +359,6 @@ every map.")
 
 
 	def compare_conditions(self, condition_pair=None, comparison_effect="likelihood",
-		comparison_statistic=get_difference_between_conditions,
 		 tail="right", gene_readcount_total_bin_quantiles=[0.025, .3], 
 		allow_reversed_permutations=None,
 			max_null_iterations=20, 
@@ -383,8 +384,6 @@ every map.")
 				If `likelihood`, the values are the difference in log likelihood when the model
 				uses its fitted gene effect for cell line in each condition vs the gene effect
 				of the same cell line in the opposite condition.
-			`comparison_statistic` (`func`): a function that accepts two estimates of effect as
-				`pd.Dataframe`s and returns a single `pd.DataFrame` estimating the difference.
 			`tail`: ("left", "right", or "both"): which tails to test the p-value in. If "likelihood"
 				is chosen as the comparison effect, this should be "right". If gene effect, 
 				you may want to test "both".
@@ -430,10 +429,6 @@ every map.")
 		if not callable(comparison_effect):
 			raise ValueError("`comparison_effect` must be a callable that accepts `Chronos`\
 isntances or one of %r" % list(self.comparison_effect_dict.keys())
-			)
-		if not callable(comparison_statistic):
-			raise ValueError("`comparison_statistic` must be a callable that accepts 3 \
-`pandas.Series` or %r" % list(self.comparison_statistic_dict.keys())
 			)
 
 		if allow_reversed_permutations is None:
@@ -593,37 +588,6 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 				break
 
 		return permuted_maps, out, permuted_gene_effects
-
-
-	def get_comparison_statistic(self, distinguished_result, permuted_results, statistic, 
-		condition_pair):
-
-		observed_statistic = {}
-		permuted_statistics = []
-		for line in self.compared_lines:
-			baseline = '%s__in__%s' % (line, condition_pair[0])
-			alt = '%s__in__%s' % (line, condition_pair[1])
-
-			observed_statistic[line] = statistic(
-				distinguished_result.loc[baseline],
-				distinguished_result.loc[alt]
-			)
-
-			permuted_diff = pd.DataFrame([
-				statistic(
-					permuted_result.loc[baseline],
-					permuted_result.loc[alt]
-				)
-				for permuted_result in permuted_results
-			])
-			permuted_diff.index = [line] * len(permuted_diff)
-			permuted_statistics.append(permuted_diff)
-
-		permuted_statistics = pd.concat(permuted_statistics)
-		observed_statistic = pd.DataFrame(observed_statistic).T
-
-		return observed_statistic, permuted_statistics
-
 
 
 	def get_significance_by_readcount_bin(self, retained_readcounts,
