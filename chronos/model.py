@@ -424,39 +424,40 @@ def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, 
 		.merge(sequence_map[["sequence_ID", "cell_line_name"]], how="left", on="sequence_ID")\
 		.merge(guide_gene_map[["sgrna", "gene"]], how="left", on="sgrna")\
 		.rename(columns={0: "LFC"})\
-		.sort_values("LFC")
+		.sort_values(["cell_line_name", "gene", "LFC"])\
+		.reset_index(drop=True)
 
-	groups = lfc_stack.groupby(["cell_line_name", "gene"])
+	print("finding group boundaries")
+	gene_transitions = np.append(lfc_stack.gene.values[:-1] != lfc_stack.gene.values[1:], True)
+	cell_transitions = np.append(lfc_stack.cell_line_name.values[:-1] != lfc_stack.cell_line_name.values[1:], True)
+	transitions = gene_transitions | cell_transitions
+	transition_indices = lfc_stack.index[transitions]
 
-	groups = {key: val for key, val in groups}
+	print("removing cases with only one guide and replicate")
+	number_lfcs = transition_indices[1:] - transition_indices[:-1]
+	to_drop = transition_indices[[transition_indices[0] == lfc_stack.index[0]] + list(number_lfcs < 2)]
+	lfc_stack.drop(to_drop, inplace=True)
+	transition_indices = sorted(set(transition_indices) - set(to_drop))
 
-	print("subsetting to cell line/gene pairs with at least two LFC measurements \
-and one LFC > `absolute_cutoff`")
-	# note this is written to avoid conditionals in the loop
-	max_lfc = pd.Series({key: val.LFC.max() for key, val in groups.items()})
-	len_vals = pd.Series({key: val.LFC.notnull().sum() for key, val in groups.items()})
-	consider = max_lfc.index[(max_lfc > absolute_cutoff) & (len_vals>1)]
+	print("finding maximal values")
+	maxima = lfc_stack.LFC[transition_indices].values
+	second_maxima = lfc_stack.LFC[np.array(transition_indices).astype(np.int64)-1].values
+	gaps = maxima - second_maxima
 
-	print("finding gaps that exceed `gap_cutoff`")
-	is_bad = pd.Series({key: groups[key].LFC.values[-1] - groups[key].LFC.values[-2] > gap_cutoff
-					for key in consider})
-	bad_groups = is_bad.index[is_bad.values]
-	
-	print("found %i outgrowths, %1.1E of the total" % (len(bad_groups), len(bad_groups)/lfc.notnull().sum().sum()))
-	if not len(bad_groups):
-		return
+
+	print("making mask")
+	lfc_stack["Mask"] = False
+	bad_rows = np.array(transition_indices)[(maxima > absolute_cutoff) & (gaps > gap_cutoff)]
+	print("found %i outgrowths, %1.1E of the total" % (len(bad_rows), len(bad_rows)/len(lfc_stack)))
+	lfc_stack["Mask"].loc[bad_rows] = True
+
+	print("pivoting mask")
+	mask = pd.pivot(lfc_stack, values="Mask", index="sequence_ID", columns="sgrna")
+
+	print("aligning_mask")
+	mask = mask.reindex(index=readcounts.index, columns=readcounts.columns).fillna(False)
 
 	print("NaNing")
-	bad_indices = list(zip(*[(groups[key].sequence_ID.values[-1], groups[key].sgrna.values[-1])
-					for key in bad_groups]))
-
-	mask = pd.DataFrame({
-		"sequence_ID": list(bad_indices[0]), "sgrna": list(bad_indices[1]), "value": True
-	})
-
-	mask = pd.pivot(mask, index="sequence_ID", columns="sgrna", values="value")
-	mask = mask.reindex(index=readcounts.index, columns=readcounts.columns).fillna(False)
-	
 	readcounts.mask(mask, inplace=True)
 
 
