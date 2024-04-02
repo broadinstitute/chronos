@@ -506,7 +506,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 		print("calculating empirical significance")
 		significance = self.get_significance_by_readcount_bin(
-			self.retained_readcounts, self.distinguished_map,
+			self.readcount_gene_totals, self.distinguished_map,
 			self.compared_lines,
 			self.distinguished_result, self.permuted_results,
 			tail, gene_readcount_total_bin_quantiles
@@ -592,18 +592,10 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 		return permuted_maps, out, permuted_gene_effects
 
 
-	def get_significance_by_readcount_bin(self, retained_readcounts,
+	def get_significance_by_readcount_bin(self, readcount_gene_totals,
 		distinguished_map, compared_lines, observed_statistic, permuted_statistics, 
 			tail, gene_readcount_total_bin_quantiles,  additional_annotations={}
 		):
-
-		readcount_gene_totals = sum_collapse_dataframes([
-			retained_readcounts[key]\
-						.groupby(self.guide_gene_map[key].set_index("sgrna")["gene"], axis=1)\
-						.sum()\
-						.sum(axis=0)
-			for key in self.keys
-		])
 
 		bins = readcount_gene_totals.quantile([0] + gene_readcount_total_bin_quantiles + [1])
 		bins[0] = 0
