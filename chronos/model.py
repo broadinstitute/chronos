@@ -386,73 +386,78 @@ batches, too few to estimate overdispersion.")
 
 	return alpha
 
-def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, gap_cutoff=2):
+def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, gap_cutoff=2,
+				  rpm_normalize=False):
 	'''
-	NaNs readcounts in cases where all of the following are true:
-		- The value  for the guide/replicate pair corresponds to the most positive log fold change of all guides and all replicates 
-			for a cell line
+	NaNs readcounts IN PLACE in cases where all of the following are true:
 		- The logfold change for the guide/replicate pair is greater than `absolute_cutoff`
-		- The difference between the lfc for this pair and the next most positive pair for that gene and cell line is greater than 
-			gap_cutoff
+		- The difference between the lfc for this pair and the next most positive pair for that gene 
+			and cell line is greater than `gap_cutoff`. 
 	Readcounts are mutated in place.
 	Parameters:
 		readcounts (`pandas.DataFrame`): readcount matrix with replicates on rows, guides on columns
 		sequence_map (`pandas.DataFrame`): has string columns "sequence_ID", "cell_line_name", and "pDNA_batch"
 		guide_gene_map (`pandas.DataFrame`): has string columns "sequence_ID", "cell_line_name", and "pDNA_batch"
-
+		absolute_cutoff (`float`): LFCs less positive than this will not be considered outliers
+		gap_cutoff (`float`): See above.
+		rpm_normalize (`bool`): whether to RPM normalize the readcounts before computing LFC.
+			This is not done in place.
 	'''
+	
 	check_inputs(readcounts={'default': readcounts}, sequence_map={'default': sequence_map},
 					 guide_gene_map={'default': guide_gene_map})
+	
 	print('calculating LFC')
-	fc = calculate_fold_change(readcounts, sequence_map)
+	fc = calculate_fold_change(readcounts, sequence_map, rpm_normalize)
 	lfc = pd.DataFrame(
 		np.log2(fc.values), index=fc.index,columns=fc.columns
 	)
 
+	print("stacking and annotating LFC")
+	lfc_stack = lfc.copy()
+	lfc_stack.index.name = "sequence_ID"
+	lfc_stack.columns.name = "sgrna"
+	
+	lfc_stack = lfc_stack\
+		.stack()\
+		.reset_index()\
+		.merge(sequence_map[["sequence_ID", "cell_line_name"]], how="left", on="sequence_ID")\
+		.merge(guide_gene_map[["sgrna", "gene"]], how="left", on="sgrna")\
+		.rename(columns={0: "LFC"})\
+		.sort_values(["cell_line_name", "gene", "LFC"])\
+		.reset_index(drop=True)
 
-	print('finding maximum LFC calls')
-	ggtemp = guide_gene_map.set_index('sgrna').gene.sort_values()
-	multigenes = set(ggtemp.value_counts().loc[lambda x: x > 1].index)
-	ggtemp = ggtemp[ggtemp.isin(multigenes)]
+	print("finding group boundaries")
+	gene_transitions = np.append(lfc_stack.gene.values[:-1] != lfc_stack.gene.values[1:], True)
+	cell_transitions = np.append(lfc_stack.cell_line_name.values[:-1] != lfc_stack.cell_line_name.values[1:], True)
+	transitions = gene_transitions | cell_transitions
+	transition_indices = lfc_stack.index[transitions]
 
-	max_lfc = lfc.groupby(ggtemp, axis=1).max()
-	print("filtering")
-	potential_cols = max_lfc.columns[(max_lfc.max() > absolute_cutoff).values]
-	potential_rows = max_lfc.index[(max_lfc.max(axis=1) > absolute_cutoff).values]
-	max_lfc = max_lfc.loc[potential_rows, potential_cols]
-	ggtemp = ggtemp[ggtemp.isin(potential_cols)]
-	lfc_filtered = lfc.loc[potential_rows, ggtemp.index]
-	ggreversed = pd.Series(ggtemp.index.values, index=ggtemp.values).sort_index()
+	print("removing cases with only one guide and replicate")
+	number_lfcs = transition_indices[1:] - transition_indices[:-1]
+	to_drop = transition_indices[[transition_indices[0] == lfc_stack.index[0]] + list(number_lfcs < 2)]
+	lfc_stack.drop(to_drop, inplace=True)
+	transition_indices = sorted(set(transition_indices) - set(to_drop))
 
-	print("finding second highest LFC calls")
-	second_highest_indices = np.cumsum(ggtemp.value_counts().sort_index())-2
+	print("finding maximal values")
+	maxima = lfc_stack.LFC[transition_indices].values
+	second_maxima = lfc_stack.LFC[np.array(transition_indices).astype(np.int64)-1].values
+	gaps = maxima - second_maxima
 
-	def second_highest(x):
-		return x.values[np.argpartition(-x.values, 1)[1]]
 
-	max_row_2nd_column = lfc_filtered.T.groupby(ggtemp, axis=0).agg(second_highest).T 
+	print("making mask")
+	lfc_stack["Mask"] = False
+	bad_rows = np.array(transition_indices)[(maxima > absolute_cutoff) & (gaps > gap_cutoff)]
+	print("found %i outgrowths, %1.1E of the total" % (len(bad_rows), len(bad_rows)/len(lfc_stack)))
+	lfc_stack["Mask"].loc[bad_rows] = True
 
-	second_highest = max_row_2nd_column.loc[max_lfc.index, max_lfc.columns].values 
+	print("pivoting mask")
+	mask = pd.pivot(lfc_stack, values="Mask", index="sequence_ID", columns="sgrna")
 
-	gap = pd.DataFrame(max_lfc.values - second_highest, #second_highest
-		index=max_lfc.index, columns=max_lfc.columns)
+	print("aligning_mask")
+	mask = mask.reindex(index=readcounts.index, columns=readcounts.columns).fillna(False)
 
-	print('finding sequences and guides with outgrowth')
-
-	masked = max_lfc.copy()
-	masked[(max_lfc <= absolute_cutoff) | (gap <= gap_cutoff)] = np.nan
-	masked = masked.reindex(index=lfc_filtered.index, columns=ggtemp.values).fillna(False)
-	masked.columns = ggtemp.index
-	max_lfc_expanded = max_lfc.reindex(index=lfc_filtered.index, columns=ggtemp.values)
-	max_lfc_expanded.columns = ggtemp.index
-	mask = (lfc_filtered == max_lfc_expanded) & masked
-	mask = mask.reindex(index=readcounts.index, columns=readcounts.columns).fillna(False).astype(bool)
-
-	print("NAing %i readcounts (%1.5f of total)" % (
-		mask.sum().sum(), mask.sum().sum()/readcounts.notnull().sum().sum()
-		)
-	)
-
+	print("NaNing")
 	readcounts.mask(mask, inplace=True)
 
 
