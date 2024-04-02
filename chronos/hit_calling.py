@@ -235,6 +235,8 @@ def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reve
 		raise ValueError("can only compare two conditions. If `condition_pair` is not passed, \
 the 'condition' column of `condition_map` must have exactly two unique values for non-pDNA entries.")
 
+	
+
 	#drop days column for identifying possible permutations
 	days_map = seq_map[['cell_line_name','days']].drop_duplicates()
 	base = seq_map.drop(columns=['days','sequence_ID']).drop_duplicates()
