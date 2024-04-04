@@ -637,7 +637,9 @@ class Chronos(object):
 				 verify_integrity=True, 
 				 log_dir=None,
 				 to_normalize_readcounts=True,
-				 use_line_mean_as_reference=5
+				 use_line_mean_as_reference=5,
+
+				 verbose=True
 				):
 		'''
 		Parameters:
@@ -695,6 +697,7 @@ class Chronos(object):
 								Chronos will normalize such that the median log reads of negative controls in each replicate match
 								the median in the pDNA batch. 
 			use_line_mean_as_reference (`int`): passed to `estimate_alpha`
+			verbose (`bool`): whether to print various checkpoints to stdout
 
 		Attributes:
 			Attributes beginning wit "v_" are tensorflow variables, and attributes beginning with _ are 
@@ -737,7 +740,8 @@ class Chronos(object):
 
 		sequence_map = self._make_pdna_unique(sequence_map, readcounts)
 		if to_normalize_readcounts:
-			print("normalizing readcounts")
+			if verbose:
+				print("normalizing readcounts")
 			readcounts = {key: normalize_readcounts(val, negative_control_sgrnas.get(key), sequence_map[key])
 						for key, val in readcounts.items()}
 		self.sequence_map = sequence_map
@@ -755,6 +759,7 @@ class Chronos(object):
 				raise ValueError("scale_cost must be None, False, or a semi-positive number")
 
 		self.zero = tf.constant(0, dtype)
+		self.verbose = verbose
 
 
 		####################    C  R  E  A  T  E       M  A  P  P  I  N  G  S   ########################
@@ -847,7 +852,8 @@ class Chronos(object):
 
 		##################    C  R  E  A  T  E       V  A  R  I  A  B  L  E  S   #######################
 
-		print('\n\nBuilding variables')
+		if self.verbose:
+			print('\n\nBuilding variables')
 
 		(
 				self.v_t0, self._t0_core, 
@@ -881,7 +887,9 @@ class Chronos(object):
 
 		#############################    C  O  R  E      M  O  D  E  L    ##############################
 
-		print("\n\nConnecting graph nodes in model")
+		if verbose:
+			if self.verbose:
+				print("\n\nConnecting graph nodes in model")
 		# _effective_days: _days - _screen_delay clipped to be semipositive. Library dict per cell line
 		self._effective_days = self._get_effect_days(self._screen_delay, self._days)
 		#_gene_effect_growth: 
@@ -900,12 +908,15 @@ class Chronos(object):
 		self._predicted_readcounts_unscaled, self._predicted_readcounts = self._get_abundance_estimates(self._t0, self._change)
 
 		init_op = tf.compat.v1.global_variables_initializer()
-		print('initializing precost variables')
+		if verbose:
+			if self.verbose:
+				print('initializing precost variables')
 		self.sess.run(init_op)
 
 		#####################################    C  O  S  T    #########################################
 
-		print("\n\nBuilding all costs")
+		if self.verbose:
+			print("\n\nBuilding all costs")
 
 		self._total_guide_reg_cost = self._get_guide_regularization_alt(self._guide_efficacy, dtype)
 
@@ -929,7 +940,8 @@ class Chronos(object):
 
 		#########################    F  I  N  A  L  I  Z  I  N  G    ###################################
 
-		print('\nCreating optimizer')       
+		if self.verbose:
+			print('\nCreating optimizer')       
 		self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=self._learning_rate, name="Adam")
 
 
@@ -942,7 +954,8 @@ class Chronos(object):
 				self.v_library_effect
 				]
 		if self.median_guide_counts <= 2:
-			print("Two or fewer guides for most genes, guide efficacy will not be trained")
+			if self.verbose:
+				print("Two or fewer guides for most genes, guide efficacy will not be trained")
 			self.default_var_list.remove(self.v_guide_efficacy)
 
 		self._step = self.optimizer.minimize(self._full_cost, var_list=self.default_var_list)
@@ -952,7 +965,8 @@ class Chronos(object):
 		self._merged = tf.compat.v1.summary.merge_all()
 
 		if log_dir is not None:
-			print("\tcreating log at %s" %log_dir)
+			if self.verbose:
+				print("\tcreating log at %s" %log_dir)
 			if os.path.isdir(log_dir):
 				shutil.rmtree(log_dir)
 			os.mkdir(log_dir)
@@ -960,7 +974,8 @@ class Chronos(object):
 			self.writer = tf.compat.v1.summary.FileWriter(log_dir, self.sess.graph)
 		
 		init_op = tf.compat.v1.global_variables_initializer()
-		print('initializing rest of graph')
+		if self.verbose:
+			print('initializing rest of graph')
 		self.sess.run(init_op)
 
 		if scale_cost:
@@ -968,20 +983,24 @@ class Chronos(object):
 			self.run_dict.update({self._scale: scale_cost/denom})
 
 		if smart_init:
-			print("estimating initial screen efficacy and gene effect")
+			if self.verbose:
+				print("estimating initial screen efficacy and gene effect")
 			self.smart_initialize(readcounts, sequence_map, guide_gene_map, cell_efficacy_guide_quantile, negative_control_sgrnas,
 				initial_screen_delay)
 
 		if verify_integrity:
-			print("\tverifying graph integrity")
+			if self.verbose:
+				print("\tverifying graph integrity")
 			self.nan_check()
 
 		self.epoch = 0
 
 		if self._pretrained:
-			print('waiting for user to load model')
+			if self.verbose:
+				print('waiting for user to load model')
 		else:
-			print('ready to train')
+			if self.verbose:
+				print('ready to train')
 
 
 
@@ -1070,7 +1089,8 @@ class Chronos(object):
 
 
 	def _get_column_attributes(self, readcounts, guide_gene_map):
-		print('\n\nFinding all unique guides and genes')
+		if self.verbose:
+			print('\n\nFinding all unique guides and genes')
 		#guarantees the same sequence of guides and genes within each library
 		guides = {key: val.columns for key, val in readcounts.items()}
 		genes = {key: val.set_index('sgrna').loc[guides[key], 'gene'] for key, val in guide_gene_map.items()}
@@ -1078,11 +1098,14 @@ class Chronos(object):
 		all_genes = sorted(set.union(*[set(v.values) for v in genes.values()]))
 		intersecting_genes = sorted(set.intersection(*[set(v.values) for v in genes.values()]))
 		for key in self.keys:
-			print("found %i unique guides and %i unique genes in %s" %(
+			if self.verbose:
+				print("found %i unique guides and %i unique genes in %s" %(
 				len(set(guides[key])), len(set(genes[key])), key
 				))
-		print("found %i unique guides and %i unique genes overall" %(len(all_guides), len(all_genes)))
-		print('\nfinding guide-gene mapping indices')
+		if self.verbose:
+			print("found %i unique guides and %i unique genes overall" %(len(all_guides), len(all_genes)))
+		if self.verbose:
+			print('\nfinding guide-gene mapping indices')
 		#in guide_map, gather_index_inner gives the index of the targeted gene in all_genes
 		#gather_index_outer gives the index of the sgrna in all_guides
 		#concretely, for any tensor with guides as columns, the ith column is the sgrna 
@@ -1112,7 +1135,8 @@ class Chronos(object):
 
 
 	def _get_row_attributes(self, readcounts, sequence_map):
-		print('\nfinding all unique sequenced replicates, cell lines, and pDNA batches')
+		if self.verbose:
+			print('\nfinding all unique sequenced replicates, cell lines, and pDNA batches')
 		#guarantees the same sequence of sequence_IDs and cell lines within each library.
 		sequences = {key: val[val.cell_line_name != 'pDNA'].sequence_ID for key, val in sequence_map.items()}
 		pDNA_batches = {key: list(val[val.cell_line_name != 'pDNA'].pDNA_batch.values)
@@ -1128,12 +1152,15 @@ class Chronos(object):
 		assert len(all_sequences) == sum([len(val) for val in sequences.values()]
 			), "sequence IDs must be unique among all datasets"
 		for key in self.keys:
-			print("found %i unique sequences (excluding pDNA) and %i unique cell lines in %s" %(
+			if self.verbose:
+				print("found %i unique sequences (excluding pDNA) and %i unique cell lines in %s" %(
 				len(set(sequences[key])), len(set(cells[key])), key
 				))
-		print("found %i unique replicates and %i unique cell lines overall" %(len(all_sequences), len(all_cells)))
+		if self.verbose:
+			print("found %i unique replicates and %i unique cell lines overall" %(len(all_sequences), len(all_cells)))
 
-		print('\nfinding replicate-cell line mappings indices')
+		if self.verbose:
+			print('\nfinding replicate-cell line mappings indices')
 		# in replicate_map, gather_index_inner gives the index of the replicate's cell line in all_cells
 		# gather_index_outer gives the index of the replicate in all_sequences
 		replicate_map = {key: 
@@ -1143,7 +1170,8 @@ class Chronos(object):
 		index_map = {key: np.array(all_sequences)[replicate_map[key]['gather_ind_outer']]
 								for key in self.keys}
 
-		print('\nfinding replicate-pDNA mappings indices')
+		if self.verbose:
+			print('\nfinding replicate-pDNA mappings indices')
 		batch_map = {key: 
 				Chronos.make_map(sequence_map[key][['sequence_ID', 'pDNA_batch']].set_index('sequence_ID').iloc[:, 0],
 				 all_sequences, pDNA_unique[key], self.np_dtype)
@@ -1157,13 +1185,15 @@ class Chronos(object):
 
 	def _estimate_excess_variance(self, excess_variance, readcounts, negative_control_sgrnas, sequence_map,
 			use_line_mean_as_reference):
-		print('Estimating or aligning variances')
+		if self.verbose:
+			print('Estimating or aligning variances')
 		if not isinstance(excess_variance, dict):
 			prior_variance = excess_variance
 			excess_variance = {}
 		for key in self.keys:
 			if not (negative_control_sgrnas.get(key) is None) and not key in excess_variance:
-				print('\tEstimating excess variance (alpha) for %s' % key)
+				if self.verbose:
+					print('\tEstimating excess variance (alpha) for %s' % key)
 				excess_variance[key] = estimate_alpha(
 						readcounts[key], negative_control_sgrnas[key], sequence_map[key],
 						use_line_mean_as_reference=use_line_mean_as_reference
@@ -1173,7 +1203,8 @@ class Chronos(object):
 		return excess_variance
 
 	def _get_excess_variance_tf(self, excess_variance):
-		print("Creating excess variance tensors")
+		if self.verbose:
+			print("Creating excess variance tensors")
 		_excess_variance = {}
 		with tf.compat.v1.name_scope("excess_variance"):
 			for key in self.keys:
@@ -1186,7 +1217,8 @@ class Chronos(object):
 					raise IndexError("difference between index values for excess_variance and replicates found in %s" % key)
 				except TypeError:
 					_excess_variance[key] = tf.Variable(excess_variance * np.ones(shape=(len(self.index_map[key]), 1)))
-				print("\tCreated excess variance tensor for %s with shape %r" % (key, _excess_variance[key].get_shape().as_list()))
+				if self.verbose:
+					print("\tCreated excess variance tensor for %s with shape %r" % (key, _excess_variance[key].get_shape().as_list()))
 		return _excess_variance
 
 
@@ -1202,7 +1234,8 @@ class Chronos(object):
 
 
 	def _initialize_graph(self, max_learning_rate, dtype):
-		print('initializing graph')
+		if self.verbose:
+			print('initializing graph')
 		self.sess = tf.compat.v1.Session()
 		self._learning_rate = tf.compat.v1.placeholder(shape=tuple(), dtype=dtype)
 		self.run_dict = {self._learning_rate: max_learning_rate}
@@ -1212,7 +1245,8 @@ class Chronos(object):
 
 	def _get_gene_effect_mask(self, readcounts, sequence_map, guide_gene_map, dtype):
 		# excludes genes in a cell line with reads from only one library
-		print('\nbuilding gene effect mask')
+		if self.verbose:
+			print('\nbuilding gene effect mask')
 
 		masks = {
 			key: readcounts[key]\
@@ -1250,7 +1284,8 @@ class Chronos(object):
 
 
 	def _get_days(self, sequence_map, dtype):   
-		print('\nbuilding doubling vectors')
+		if self.verbose:
+			print('\nbuilding doubling vectors')
 		with tf.compat.v1.name_scope("days"):
 			_days = {key: 
 				tf.constant(
@@ -1262,13 +1297,15 @@ class Chronos(object):
 				)
 			for key, val in sequence_map.items()}
 		for key in self.keys:
-			print("made days vector of shape %r for %s" %(
+			if self.verbose:
+				print("made days vector of shape %r for %s" %(
 				_days[key].get_shape().as_list(), key))
 		return _days
 
 
 	def _get_late_tf_timepoints(self, readcounts, dtype):
-		print("\nbuilding late observed timepoints")
+		if self.verbose:
+			print("\nbuilding late observed timepoints")
 		_normalized_readcounts = {}
 		_mask = {}
 		for key in self.keys:
@@ -1278,13 +1315,15 @@ class Chronos(object):
 			_mask[key] = tf.constant(mask, dtype=tf.bool, name='NaN_mask_%s' % key)
 			normalized_readcounts_np[~mask] = 0
 			_normalized_readcounts[key] = self.get_persistent_input(dtype, normalized_readcounts_np, name='normalized_readcounts_%s' % key)
-			print("\tbuilt normalized timepoints for %s with shape %r (replicates X guides)" %(
+			if self.verbose:
+				print("\tbuilt normalized timepoints for %s with shape %r (replicates X guides)" %(
 				key, normalized_readcounts_np.shape))
 		return _normalized_readcounts, _mask
 
 
 	def _get_tf_measured_t0(self, readcounts, sequence_map, dtype):
-		print('\nbuilding t0 reads')
+		if self.verbose:
+			print('\nbuilding t0 reads')
 		_measured_t0 = {}
 		_pdna_scale = {}
 		with tf.compat.v1.name_scope("measured_t0"):
@@ -1301,7 +1340,8 @@ class Chronos(object):
 					batch = pd.DataFrame({self.pDNA_unique[key][0]: batch.iloc[0]}).T.astype(self.np_dtype)
 				batch = batch.loc[self.pDNA_unique[key], self.column_map[key]]
 				if batch.isnull().sum().sum() != 0:
-					print(batch)
+					if self.verbose:
+						print(batch)
 					raise RuntimeError("NaN values encountered in batched pDNA")
 				rc = rc.loc[self.index_map[key], self.column_map[key]]
 				batchsum = batch.sum(axis=1).iloc[self.batch_map[key]['gather_ind_inner']]
@@ -1317,7 +1357,8 @@ class Chronos(object):
 ##################    C  R  E  A  T  E       V  A  R  I  A  B  L  E  S   #######################
 
 	def _get_t0_tf_variables(self, _measured_t0, dtype):
-		print("\nbuilding t0 reads estimate")
+		if self.verbose:
+			print("\nbuilding t0 reads estimate")
 
 		v_t0 = {}
 		_t0_core = {}
@@ -1397,7 +1438,8 @@ class Chronos(object):
 						)
 
 
-				print("made t0 batch with shape %r for %s" %(
+				if self.verbose:
+					print("made t0 batch with shape %r for %s" %(
 					t0_normed.shape, key))
 
 		return v_t0, _t0_core, _t0, _t0_offset, \
@@ -1406,7 +1448,8 @@ class Chronos(object):
 
 
 	def _get_tf_guide_efficacy(self, dtype):        
-		print("building guide efficacy")
+		if self.verbose:
+			print("building guide efficacy")
 		with tf.compat.v1.name_scope("guide_efficacy"):
 			v_guide_efficacy = tf.Variable(
 				#last guide is dummy
@@ -1418,12 +1461,14 @@ class Chronos(object):
 				name="masked")
 			_guide_efficacy = tf.exp(-tf.abs(_guide_efficacy_masked), name='guide_efficacy')
 			tf.compat.v1.summary.histogram("guide_efficacy", _guide_efficacy)
-			print("built guide efficacy: shape %r" %_guide_efficacy.get_shape().as_list())
+			if self.verbose:
+				print("built guide efficacy: shape %r" %_guide_efficacy.get_shape().as_list())
 		return v_guide_efficacy, _guide_efficacy_mask_input, _guide_efficacy
 
 
 	def _get_tf_growth_rate(self, dtype):
-		print("building growth rate")
+		if self.verbose:
+			print("building growth rate")
 		with tf.compat.v1.name_scope("growth_rate"):
 			v_growth_rate = { key: tf.Variable(
 					np.random.normal(size=(self.nlines, 1), scale=.01, loc=1).astype(self.np_dtype),
@@ -1441,13 +1486,15 @@ class Chronos(object):
 			_growth_rate = {key: tf.divide(val, tf.reduce_mean(input_tensor=tf.boolean_mask(tensor=val, mask=_line_presence_boolean[key])), 
 									name="growth_rate_%s" % key)
 								for key, val in _growth_rate_square.items()}
-		print("built growth rate: shape %r" % {key: val.get_shape().as_list() 
+		if self.verbose:
+			print("built growth rate: shape %r" % {key: val.get_shape().as_list() 
 			for key, val in _growth_rate.items()})
 		return v_growth_rate, _growth_rate, _line_presence_boolean
 
 
 	def _get_tf_cell_efficacy(self, dtype):
-		print("\nbuilding cell line efficacy")
+		if self.verbose:
+			print("\nbuilding cell line efficacy")
 		with tf.compat.v1.name_scope("cell_efficacy"):
 			v_cell_efficacy = { key: tf.Variable(
 					np.random.normal(size=(self.nlines, 1), scale=.01, loc=0).astype(self.np_dtype),
@@ -1456,24 +1503,28 @@ class Chronos(object):
 			_cell_efficacy = {key: tf.exp(-tf.abs(v_cell_efficacy[key]),
 							  name='%s' % key)
 					for key in self.keys}
-		print("built cell line efficacy: shapes %r" % {key: v.get_shape().as_list() for key, v in _cell_efficacy.items()})
+		if self.verbose:
+			print("built cell line efficacy: shapes %r" % {key: v.get_shape().as_list() for key, v in _cell_efficacy.items()})
 		return v_cell_efficacy, _cell_efficacy
 
 
 	def _get_tf_screen_delay(self, initial_screen_delay, dtype):
-		print("building screen delay")
+		if self.verbose:
+			print("building screen delay")
 		with tf.compat.v1.name_scope("screen_delay"):
 			v_screen_delay = tf.Variable(
 							np.sqrt(Chronos.default_timepoint_scale * initial_screen_delay) * np.ones((1, self.ngenes), dtype=self.np_dtype),
 					 		dtype=dtype, name="base")
 			_screen_delay = tf.square(v_screen_delay)
 		tf.compat.v1.summary.histogram("screen_delay", _screen_delay)
-		print("built screen delay")
+		if self.verbose:
+			print("built screen delay")
 		return v_screen_delay, _screen_delay
 
 
 	def _get_tf_gene_effect(self, dtype):
-		print("building gene effect")
+		if self.verbose:
+			print("building gene effect")
 
 		with tf.compat.v1.name_scope("GE"):
 			gene_effect_est = np.random.uniform(-.0001, .0001, size=(self.nlines, self.ngenes)).astype(self.np_dtype)
@@ -1527,25 +1578,29 @@ class Chronos(object):
 				_library_effect = {key: v - _library_effect_mean for key, v in _library_effect_indicated.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
-		print("built core gene effect: %i cell lines by %i genes" %tuple(_combined_gene_effect.get_shape().as_list()))
+		if self.verbose:
+			print("built core gene effect: %i cell lines by %i genes" %tuple(_combined_gene_effect.get_shape().as_list()))
 		return v_mean_effect, v_residue, _residue, _true_residue, _combined_gene_effect, v_library_effect, _library_effect
 
 
 #############################    C  O  R  E      M  O  D  E  L    ##############################
 
 	def _get_effect_days(self, _screen_delay, _days):
-		print("\nbuilding effective days")
+		if self.verbose:
+			print("\nbuilding effective days")
 		with tf.compat.v1.name_scope("effective_days"):
 			_effective_days = {key: 
 				tf.clip_by_value(val - _screen_delay, 0, 100, name=key)
 			for key, val in _days.items()}
 
-		print("built effective days, shapes %r" % {key: val.get_shape().as_list() for key, val in _effective_days.items()})
+		if self.verbose:
+			print("built effective days, shapes %r" % {key: val.get_shape().as_list() for key, val in _effective_days.items()})
 		return _effective_days
 
 
 	def _get_gene_effect_growth(self, _combined_gene_effect, _growth_rate, _library_effect):
-		print('\nbuilding gene effect growth graph nodes')
+		if self.verbose:
+			print('\nbuilding gene effect growth graph nodes')
 		with tf.compat.v1.name_scope('GE_growth'):
 
 			_gene_effect_growth = {key: 
@@ -1555,13 +1610,15 @@ class Chronos(object):
 					name=key) 
 			for key in self.keys}
 
-		print("built gene effect growth graph nodes, shapes %r" % {key: val.get_shape().as_list() 
+		if self.verbose:
+			print("built gene effect growth graph nodes, shapes %r" % {key: val.get_shape().as_list() 
 			for key, val in _gene_effect_growth.items()})
 		return _gene_effect_growth
 
 
 	def _get_combined_efficacy(self, _cell_efficacy, _guide_efficacy):
-		print('\nbuilding combined efficacy')
+		if self.verbose:
+			print('\nbuilding combined efficacy')
 		with tf.compat.v1.name_scope('efficacy'):
 			_efficacy = {key: 
 					tf.matmul(_cell_efficacy[key], tf.gather(_guide_efficacy, self.guide_map[key]['gather_ind_outer'], axis=1, name='guide_%s' % key),
@@ -1575,13 +1632,16 @@ class Chronos(object):
 						)
 				for key in self.keys
 			}
-		print("built combined efficacy, shape %r" % {key: v.get_shape().as_list()for key, v in _efficacy.items()})
-		print("built expanded combined efficacy, shapes %r" % {key: val.get_shape().as_list() for key, val in _selected_efficacies.items()})
+		if self.verbose:
+			print("built combined efficacy, shape %r" % {key: v.get_shape().as_list()for key, v in _efficacy.items()})
+		if self.verbose:
+			print("built expanded combined efficacy, shapes %r" % {key: val.get_shape().as_list() for key, val in _selected_efficacies.items()})
 		return _efficacy, _selected_efficacies
 
 
 	def _get_growth_and_fold_change(self, _gene_effect_growth, _effective_days, _selected_efficacies):
-		print("\nbuilding growth estimates of edited cells and overall estimates of fold change in guide abundance")
+		if self.verbose:
+			print("\nbuilding growth estimates of edited cells and overall estimates of fold change in guide abundance")
 		_change = {}
 		_growth = {}
 		with tf.compat.v1.name_scope("FC"):
@@ -1609,18 +1669,22 @@ class Chronos(object):
 					),
 					name="FC_%s" % key  
 				)
-		print("built growth and change")
+		if self.verbose:
+			print("built growth and change")
 		return _growth, _change
 
 
 	def _get_abundance_estimates(self, _t0, _change):
-		print("\nbuilding unnormalized estimates of final abundance")
+		if self.verbose:
+			print("\nbuilding unnormalized estimates of final abundance")
 		_predicted_readcounts_unscaled = {key: tf.multiply(_t0[key], _change[key], name="out_%s" % key)
 				 for key in self.keys}
 		
-		print("built unnormalized abundance")
+		if self.verbose:
+			print("built unnormalized abundance")
 
-		print("\nbuilding normalized estimates of final abundance")
+		if self.verbose:
+			print("\nbuilding normalized estimates of final abundance")
 		with tf.compat.v1.name_scope('out_norm'):
 			_predicted_readcounts = {key: 
 					self._pdna_scale[key]\
@@ -1628,7 +1692,8 @@ class Chronos(object):
 						name=key
 						)
 							for key, val in _predicted_readcounts_unscaled.items()}
-		print("built normalized abundance")
+		if self.verbose:
+			print("built normalized abundance")
 		return _predicted_readcounts_unscaled, _predicted_readcounts
 
 
@@ -1636,7 +1701,8 @@ class Chronos(object):
 
 
 	def _get_guide_regularization_alt(self, _guide_efficacy, dtype):
-		print('\nassembling guide efficacy regularization')
+		if self.verbose:
+			print('\nassembling guide efficacy regularization')
 		with tf.compat.v1.name_scope("guide_efficacy_reg"):
 			_guide_reg_cost = tf.reduce_mean(
 						input_tensor= 1 - _guide_efficacy,
@@ -1671,7 +1737,8 @@ class Chronos(object):
 
 
 	def _get_smoothed_ge_regularization(self, v_mean_effect, _true_residue, kernel_width, dtype):
-		print("building smoothed regularization")
+		if self.verbose:
+			print("building smoothed regularization")
 		kernel_size = int(6 * kernel_width)
 		kernel_size = kernel_size + kernel_size % 2 + 1 #guarantees odd width
 		kernel = np.exp( -( np.arange(kernel_size, dtype=self.np_dtype) - kernel_size//2 )**2/ (2*kernel_width**2) )
@@ -1687,7 +1754,8 @@ class Chronos(object):
 
 
 	def _get_t0_regularization(self, _t0_offset):
-		print("\nbuilding t0 reads regularization/cost")
+		if self.verbose:
+			print("\nbuilding t0 reads regularization/cost")
 		with tf.compat.v1.name_scope("t0_reg"):
 			_t0_cost = {key:
 				tf.reduce_mean( input_tensor=tf.square(_t0_offset[key]), 
@@ -1698,7 +1766,8 @@ class Chronos(object):
 
 
 	def _get_nb2_cost(self, _excess_variance, _predicted_readcounts, _normalized_readcounts, _mask, dtype):
-		print('\nbuilding NB2 cost')
+		if self.verbose:
+			print('\nbuilding NB2 cost')
 		
 		with tf.compat.v1.name_scope('cost'):
 			# the NB2 cost: (yi + 1/alpha) * ln(1 + alpha mu_i) - yi ln(alpha mu_i)
@@ -1744,7 +1813,8 @@ class Chronos(object):
 
 
 	def _get_full_cost(self, dtype):
-		print("building other regularizations")
+		if self.verbose:
+			print("building other regularizations")
 		with tf.compat.v1.name_scope('full_cost'):
 
 			self._L1_penalty = self.gene_effect_L1 * tf.reduce_sum(
@@ -1800,7 +1870,8 @@ class Chronos(object):
 		cell_eff_est = {}
 		gene_effect_est = {}
 		for key in self.keys:
-			print('\t', key)
+			if self.verbose:
+				print('\t', key)
 			sm = sequence_map[key]
 			last_reps = extract_last_reps(sm)
 			fc = calculate_fold_change(readcounts[key], sm, rpm_normalize=False)
@@ -1864,7 +1935,8 @@ class Chronos(object):
 
 	def nan_check(self):
 		#labeled data
-		print('verifying user inputs')
+		if self.verbose:
+			print('verifying user inputs')
 		for key in self.keys:
 			if pd.isnull(self.sess.run(self._days[key], self.run_dict)).sum().sum() > 0:
 				assert False, "nulls found in self._days[%s]" %key
@@ -1894,15 +1966,18 @@ class Chronos(object):
 			print('\t' + key + ' _gene_effect')
 			if pd.isnull(self.sess.run(self._gene_effect_growth[key], self.run_dict)).sum().sum() > 0:
 				assert False, "nulls found in self._gene_effect_growth[%s]" %key
-			print('\t' + key + ' _selected_efficacies')
+			if self.verbose:
+				print('\t' + key + ' _selected_efficacies')
 			if pd.isnull(self.sess.run(self._selected_efficacies[key], self.run_dict)).sum().sum() > 0:
 				assert False, "nulls found in self._selected_efficacies[%s]" %key
-			print('\t' + key + '_predicted_readcounts_unscaled')
+			if self.verbose:
+				print('\t' + key + '_predicted_readcounts_unscaled')
 			if pd.isnull(self.sess.run(self._predicted_readcounts_unscaled[key], self.run_dict)).sum().sum() > 0:
 				assert False, "nulls found in self._predicted_readcounts_unscaled[%s]" %key
 			if (self.sess.run(self._predicted_readcounts_unscaled[key], self.run_dict) < 0).sum().sum() > 0:
 				assert False, "negatives found in self._predicted_readcounts_unscaled[%s]" %key
-			print('\t' + key + ' _predicted_readcounts')
+			if self.verbose:
+				print('\t' + key + ' _predicted_readcounts')
 			df = self.sess.run(self._predicted_readcounts[key], self.run_dict)
 			if np.sum(pd.isnull(df).sum()) > 0:
 				assert False, "%i out of %i possible nulls found in self._predicted_readcounts[%s]" % (
@@ -1910,7 +1985,8 @@ class Chronos(object):
 					)
 			if np.sum((df < 0).sum()) > 0:
 				assert False, "negative values found in predicted_readcounts[%s]" % key
-			print('\t' + key + ' _normalized_readcounts')
+			if self.verbose:
+				print('\t' + key + ' _normalized_readcounts')
 			if np.sum(pd.isnull(self.sess.run(self._normalized_readcounts[key], self.run_dict)).sum()) > 0:
 				assert False, "nulls found in self._normalized_readcounts[%s]" %key
 			min_normalized_readcounts = self.sess.run(self._normalized_readcounts[key], self.run_dict).min().min()
@@ -1920,9 +1996,11 @@ class Chronos(object):
 			min_predicted_readcounts = self.sess.run(self._predicted_readcounts[key], self.run_dict).min().min()
 			if min_predicted_readcounts < 0:
 				raise ValueError("Negative predicted normalized reads (predicted_readcounts) found (%f)" % min_predicted_readcounts)
-			print('\t' + key + ' _cost_presum')
+			if self.verbose:
+				print('\t' + key + ' _cost_presum')
 			df = self.cost_presum[key]
-			print("sess run")
+			if self.verbose:
+				print("sess run")
 			if np.sum(pd.isnull(df).sum()) > 0:
 				print(df)
 				print()
@@ -1939,10 +2017,12 @@ class Chronos(object):
 					 	self.run_dict)
 				)
 				raise ValueError("%i nulls found in self._cost_presum[%s]" % (pd.isnull(df).sum().sum(), key))
-			print('\t' + key + ' _cost')
+			if self.verbose:
+				print('\t' + key + ' _cost')
 			if pd.isnull(self.sess.run(self._cost, self.run_dict)):
 				assert False, "Cost is null"
-			print('\t' + key + ' _full_costs')
+			if self.verbose:
+				print('\t' + key + ' _full_costs')
 			if pd.isnull(self.sess.run(self._full_cost, self.run_dict)):
 				assert False, "Full cost is null"
 
@@ -2374,6 +2454,8 @@ your data" % missing
 					for key in self.keys}
 			else:
 				return pd.DataFrame(array, index=index)
+
+				
 	################################################################################################
 	########################    A  T  T  R  I  B  U  T  E  S    ####################################
 	################################################################################################
