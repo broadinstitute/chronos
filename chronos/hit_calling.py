@@ -86,8 +86,7 @@ def get_difference_distinguished(nondistinguished, baseline, alt):
 def filter_sequence_map_by_condition(condition_map, condition_pair=None):
 	'''
 	Given a pair of conditions, removes cell lines from the `condition_map` without
-	at least two replicates per condition and returns the new map. Replicates are filtered
-	so that there is an even and equal number in each condition.
+	at least two replicates per condition and returns the new map.
 	'''
 	out = condition_map.copy()
 		
@@ -128,25 +127,7 @@ in `condition_pair`: %r/n/n%r" % (condition_pair, condition_map))
 		out = out[~out.cell_line_name.isin(to_drop)]
 
 	out = out[out.condition.isin(condition_pair) | (out.cell_line_name == 'pDNA')]
-
-	#balance the number of replicates in each condition
-	retain_sequences = []
-	for line, group in out.groupby("cell_line_name"):
-		if line == 'pDNA':
-			retain_sequences.extend(list(group.sequence_ID))
-			continue
-		n_replicates = group.groupby("condition").replicate.nunique().min()
-		if n_replicates % 2:
-			n_replicates -= 1
-		for condition, subgroup in group.groupby("condition"):
-			retain_replicates = subgroup.replicate.unique()[:n_replicates]
-			retain_sequences.extend(list(
-				subgroup\
-					.query("replicate in %r" % list(retain_replicates))\
-					.sequence_ID
-			))
-
-	return out[out.sequence_ID.isin(retain_sequences)].copy()
+	return out
 
 
 def create_condition_sequence_map(condition_map, condition_pair=None):
@@ -154,7 +135,7 @@ def create_condition_sequence_map(condition_map, condition_pair=None):
 	Returns a new map filtered for `condition` in `condition_pair` with cell lines having fewer
 	than 2 replicates in either condition removed, where `cell_line_name` has "__in__<condition>" appended.
 	'''
-	out = condition_map.copy()
+	out = filter_sequence_map_by_condition(condition_map, condition_pair)
 	out['true_cell_line_name'] = out['cell_line_name'].copy()
 	
 	def cell_line_overwrite(x):
@@ -195,7 +176,6 @@ def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reve
 	mirror image are never returned. If `allow_reverse` is False,
 	mirroring permutations are discarded. E.g. if `condition` in `condition_map` is ['A', 'A', 'B', 'B'],
 	only ['A', 'B', 'A', 'B'] and ['A', 'B', 'B', 'A'] are returned.
-	Additionally, only permutations with an equal number of replicates from each condition are retained
 	'''
 	seq_map = filter_sequence_map_by_condition(condition_map, condition_pair)
 
@@ -203,7 +183,7 @@ def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reve
 		condition_pair = seq_map.query("cell_line_name != 'pDNA'").condition.unique()
 	if len(condition_pair) != 2:
 		raise ValueError("can only compare two conditions. If `condition_pair` is not passed, \
-the 'condition' column of `condition_map` must have exactly two unique values for all non-pDNA entries.")
+the 'condition' column of `condition_map` must have exactly two unique values for non-pDNA entries.")
 
 	#drop days column for identifying possible permutations
 	days_map = seq_map[['cell_line_name','days']].drop_duplicates()
@@ -221,7 +201,7 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 		y['cell_line_name'] = line
 		
 		if line == 'pDNA':
-			pdna = y.copy()
+			pdna = y
 			pdna["true_condition"] = pdna["condition"]
 			continue
 
@@ -232,15 +212,10 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 			perms = unique_permutations_no_reversed(y.condition)
 
 		for perm in perms:
-				tentative = y.copy()
-				tentative["true_condition"] = tentative["condition"]
-				tentative["condition"] = perm
-				tentative["cell_line_name"] = line
-
-				#check that the pseudo conditions have equal numbers of replicates from each real condition
-				condition_counts = tentative.groupby("condition").true_condition.value_counts()
-				if tentative.true_condition.nunique() == 2 and condition_counts.min() == condition_counts.max():
-					stack[line].append(tentative)
+				stack[line].append(y.copy())
+				stack[line][-1]["true_condition"] = stack[line][-1]["condition"]
+				stack[line][-1]["condition"] = perm
+				stack[line][-1]["cell_line_name"] = line
 
 	min_unique_permutations = min(len(v) for v in stack.values())
 	out = []
@@ -432,12 +407,12 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 		condition_pair = self._check_condition_pair(condition_pair)
 
-		self.nondistinguished_map = {key: filter_sequence_map_by_condition(condition_map, condition_pair)
-							for key, condition_map in self.condition_map.items()}
-
-		self.compared_lines = sorted(set.union(*[set(v.cell_line_name) for v in self.nondistinguished_map.values()]) - set(['pDNA']))
-		self.retained_readcounts = {key: v.loc[self.nondistinguished_map[key].sequence_ID]
-										for key, v in self.readcounts.items()}
+		print("training model with no condition distincions\n")
+		self.nondistinguished_map, self.retained_readcounts,\
+			 self.nondistinguished_result, nondistinguished_gene_effect = self.get_nondistinguished_results(
+			condition_pair, comparison_effect, **kwargs
+		)
+		self.compared_lines = self.nondistinguished_result.index
 
 		print("training model with conditions distinguished")
 		self.distinguished_map, self.distinguished_result, \
@@ -577,6 +552,35 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 		return gene_effect_annotations.merge(statistics, on=["cell_line_name", "gene"],
 			how="outer")
+
+
+
+	def get_nondistinguished_results(self, condition_pair,
+			comparison_effect, **kwargs):
+		nondistinguished_map = {key: filter_sequence_map_by_condition(
+			self.condition_map[key], condition_pair)
+			for key in self.keys
+		}
+		retained_readcounts = {
+			key:self.readcounts[key].loc[nondistinguished_map[key].sequence_ID]
+			for key in self.keys
+		}
+		nondistinguished_model = Chronos(
+			 readcounts=retained_readcounts,
+			 sequence_map=nondistinguished_map,
+			 guide_gene_map=self.guide_gene_map,
+			 use_line_mean_as_reference=np.inf,
+			 **self.kwargs
+		)
+		nondistinguished_model.train(**kwargs)
+
+		nondistinguished_result = comparison_effect(nondistinguished_model)
+		nondistinguished_gene_effect = nondistinguished_model.gene_effect
+		#del nondistinguished_model
+		self.nondistinguished_model = nondistinguished_model
+
+		return nondistinguished_map, retained_readcounts, nondistinguished_result,\
+			nondistinguished_gene_effect
 
 
 	def get_distinguished_results(self, nondistinguished_map, condition_pair,
