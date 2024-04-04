@@ -10,17 +10,69 @@ from scipy.interpolate import interp1d
 from scipy.signal import argrelextrema
 
 
-def cell_line_log_likelihood(model):
+def cell_line_log_likelihood(model, distinguished_condition_map):
 	'''get the log likelihood of the data from the Chronos model summed to the cell line/gene level and combined
 	over libraries. Note the negative sign, since `Chronos.cost_presum` is the negative log likelihood'''
 	cost_presum = model.cost_presum
 	cost_presum = [
 		v\
-			.groupby(model.sequence_map[key].set_index("sequence_ID")['cell_line_name']).sum()\
+			.groupby(distinguished_condition_map[key].set_index("sequence_ID")['true_cell_line_name']).sum()\
 			.groupby(model.guide_gene_map[key].set_index("sgrna")["gene"], axis=1).sum()
+
 		for key, v in cost_presum.items()
 	]
 	return -sum_collapse_dataframes(cost_presum)
+
+
+def reverse_gene_effect(gene_effect, distinguished_condition_map, condition_pair):
+	'''reverse the condition labels for the gene effect matrix index'''
+	out = gene_effect.copy()
+
+	if isinstance(distinguished_condition_map, dict):
+		lines = sorted(set.union(*[set(v.true_cell_line_name) 
+			for v in distinguished_condition_map.values()]))
+	else:
+		lines = list(distinguished_condition_map.true_cell_line_name.unique())
+	lines.remove("pDNA")
+
+	for line in lines:
+
+		out.loc[
+			'%s__in__%s' % (line, condition_pair[0])
+		] = gene_effect.loc['%s__in__%s' % (line, condition_pair[1])]
+
+		out.loc[
+			'%s__in__%s' % (line, condition_pair[1])
+		] = gene_effect.loc['%s__in__%s' % (line, condition_pair[0])]
+
+	return out
+
+
+def change_in_likelihood(model, distinguished_condition_map, condition_pair):
+	'''
+	Get the change in likelihood for a `model` when the gene effect of each cell line
+	in each condition is reversed
+	'''
+	likelihood_baseline = cell_line_log_likelihood(model, distinguished_condition_map)
+	ge = model.gene_effect
+	model.gene_effect = reverse_gene_effect(ge, distinguished_condition_map, condition_pair)
+	likelihood_reversed = cell_line_log_likelihood(model, distinguished_condition_map)
+	model.gene_effect = ge
+	return likelihood_baseline - likelihood_reversed
+
+
+def change_in_gene_effect(model, distinguished_condition_map, condition_pair):
+	'''get the differences in gene effect for the same lines in the first vs second condition'''
+	ge = model.gene_effect
+	# get unique lines allowing for someone deciding to put "__in__" in their base cell line name
+	all_lines = set(['__in__'.join(s.split('__in__')[:-1]) for s in ge.index])
+	out = {
+		line: ge.loc["%s__in__%s" % (line, condition_pair[0])]
+			- ge.loc["%s__in__%s" % (line, condition_pair[1])]
+		for line in all_lines
+	}
+	return pd.DataFrame(out).T
+
 
 
 def empirical_pvalue(observed, null, direction=-1):
@@ -55,6 +107,11 @@ def empirical_pvalue(observed, null, direction=-1):
 	return pvals
 
 
+################################################################
+# C O M P A R E    C O N D I T I O N S
+################################################################
+
+
 def get_difference_significance(observed, null, tail):
 	'''
 	Combines effect size, p-value, and FDR in one dataframe
@@ -75,14 +132,6 @@ def get_difference_significance(observed, null, tail):
 	return pd.DataFrame({"observed_statistic": observed, "pval": pvals, "FDR": fdr})
 
 
-def get_difference_between_conditions(nondistinguished, baseline, alt):
-	return alt - baseline
-
-
-def get_difference_distinguished(nondistinguished, baseline, alt):
-	return alt + baseline - nondistinguished
-
-
 def filter_sequence_map_by_condition(condition_map, condition_pair=None):
 	'''
 	Given a pair of conditions, removes cell lines from the `condition_map` without
@@ -96,7 +145,8 @@ def filter_sequence_map_by_condition(condition_map, condition_pair=None):
 		raise ValueError("can only compare two conditions. If `condition_pair` is not passed, \
 the 'condition' column of `condition_map` must have exactly two unique values for non-pDNA entries.")
 	if set(condition_pair) - set(out.condition):
-		raise ValueError("one or more entries in `condition_pair` %r not present in `condition_map.condition`" % condition_pair)
+		raise ValueError("one or more entries in `condition_pair` %r not present in `condition_map.condition`" 
+			% list(condition_pair))
 
 	condition_counts = out\
 					.query("condition in %r" % list(condition_pair))\
@@ -256,12 +306,8 @@ class ConditionComparison():
 	the statistics is `compare_conditions`.
 	'''
 	comparison_effect_dict = {
-			"gene_effect": lambda model: model.gene_effect,
-			"likelihood": cell_line_log_likelihood
-	}
-	comparison_statistic_dict = {
-			"gene_effect": get_difference_between_conditions,
-			"likelihood": get_difference_distinguished
+			"gene_effect": change_in_gene_effect,
+			"likelihood": change_in_likelihood
 	}
 
 	def __init__(self, readcounts, condition_map, guide_gene_map, **kwargs):
@@ -288,7 +334,6 @@ class ConditionComparison():
 		self.kwargs = kwargs
 		self.keys = sorted(self.readcounts.keys())
 
-
 	def _check_condition_pair(self,  condition_pair):
 		if condition_pair is None:
 			condition_pairs = {key: 
@@ -313,8 +358,9 @@ every map.")
 		return condition_pair
 
 
-	def compare_conditions(self, condition_pair=None, comparison_effect="gene_effect",
-		comparison_statistic=None, tail="both", n_readcount_total_bins=4, allow_reversed_permutations=None,
+	def compare_conditions(self, condition_pair=None, comparison_effect="likelihood",
+		 tail="right", gene_readcount_total_bin_quantiles=[0.025, .3], 
+		allow_reversed_permutations=None,
 			max_null_iterations=20, 
 				**kwargs):
 		'''
@@ -333,16 +379,14 @@ every map.")
 			`condition_pair` (iteranble of len 2 or None): the two conditions to be compared. If None,
 				requires that `self.condition_map` have only two uniue conditions for non-pDNA entries.
 			`comparison_effect`: "gene_effect", "likelihood", or a function that takes in a Chronos
-				instance and returns a cell line-by-gene matrix of values. Differences between rows
-				in that matrix (corresponding to the same cell line in different conditions) will
-				be used as the measure of difference in gene effect.
-			`comparison_statistic`: "gene_effect", "likelihood", `None`, or a function that takes in
-				three comparison effect series indexed by gene: from the model with no condition 
-				distinctions, the effect in the cell line in one condition, and the effect in the other
-				condition, and returns a single vector which is the measure of how much the gene effect
-				has changed. 
-				If `None`, takes the appropriate function matching `comparison_effect`.
-			`tail`: ("left", "right", or "both"): which tails to test the p-value in. 
+				instance, a condition map (`dict` of `pandas.DataFrame`), and a condition pair 
+				(`tuple` of `str`) and returns a cell line-by-gene matrix of differences.
+				If `likelihood`, the values are the difference in log likelihood when the model
+				uses its fitted gene effect for cell line in each condition vs the gene effect
+				of the same cell line in the opposite condition.
+			`tail`: ("left", "right", or "both"): which tails to test the p-value in. If "likelihood"
+				is chosen as the comparison effect, this should be "right". If gene effect, 
+				you may want to test "both".
 			`n_readcount_total_bins`: gene effect estimates for genes informed by few total reads are
 				noisier than those with abundant reads. Therefore, when calculating p-values, genes
 				will be binned by total readcounts in even quantiles. More bins improves control of 
@@ -380,19 +424,11 @@ every map.")
 				`permuted_<min, max, mean>_statistic`: as `observed_statistic`, summarized over the permutations
 
 		'''
-		if comparison_statistic is None and isinstance(comparison_effect, str):
-			comparison_statistic = comparison_effect
 		if isinstance(comparison_effect, str):
 			comparison_effect = self.comparison_effect_dict[comparison_effect]
-		if isinstance(comparison_statistic, str):
-			comparison_statistic = self.comparison_statistic_dict[comparison_statistic]
 		if not callable(comparison_effect):
 			raise ValueError("`comparison_effect` must be a callable that accepts `Chronos`\
 isntances or one of %r" % list(self.comparison_effect_dict.keys())
-			)
-		if not callable(comparison_statistic):
-			raise ValueError("`comparison_statistic` must be a callable that accepts 3 \
-`pandas.Series` or %r" % list(self.comparison_statistic_dict.keys())
 			)
 
 		if allow_reversed_permutations is None:
@@ -407,17 +443,26 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 		condition_pair = self._check_condition_pair(condition_pair)
 
-		print("training model with no condition distincions\n")
-		self.nondistinguished_map, self.retained_readcounts,\
-			 self.nondistinguished_result, nondistinguished_gene_effect = self.get_nondistinguished_results(
-			condition_pair, comparison_effect, **kwargs
+		self.nondistinguished_map = {key: filter_sequence_map_by_condition(
+			self.condition_map[key], condition_pair)
+			for key in self.keys
+		}
+		self.retained_readcounts = {
+			key:self.readcounts[key].loc[self.nondistinguished_map[key].sequence_ID]
+			for key in self.keys
+		}
+		self.compared_lines = sorted(set.union(*[set(v.cell_line_name) for v in self.nondistinguished_map.values()]))
+		self.compared_lines.remove("pDNA")
+
+		self.readcount_gene_totals = self.get_readcount_gene_totals(
+			self.retained_readcounts, self.condition_map, self.guide_gene_map
 		)
-		self.compared_lines = self.nondistinguished_result.index
 
 		print("training model with conditions distinguished")
 		self.distinguished_map, self.distinguished_result, \
 			distinguished_gene_effect = self.get_distinguished_results(
-			self.nondistinguished_map, condition_pair, comparison_effect, **kwargs
+			self.nondistinguished_map, condition_pair, comparison_effect, 
+			self.readcount_gene_totals, **kwargs
 		)
 
 		print("training model with permuted conditions")
@@ -425,12 +470,6 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			permuted_gene_effects = self.get_permuted_results(
 			max_null_iterations, self.nondistinguished_map, condition_pair, 
 			comparison_effect, allow_reversed_permutations, **kwargs
-		)
-
-		print("calculating statistics")
-		self.observed_statistic, self.permuted_statistics = self.get_comparison_statistic(
-			self.nondistinguished_result, self.distinguished_result, self.permuted_results,
-			comparison_statistic, condition_pair
 		)
 
 
@@ -448,93 +487,14 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 		gene_effect_difference = gene_effect_in_alt - gene_effect_in_baseline
 
-		gene_effect_in_alt_permuted = [
-			permuted_gene_effect.loc[[
-				'%s__in__%s' % (line, condition_pair[1])
-				for line in self.compared_lines
-			]].set_index(np.array(self.compared_lines))
-		for permuted_gene_effect in permuted_gene_effects]
-		
-		gene_effect_in_baseline_permuted = [
-			permuted_gene_effect.loc[[
-				'%s__in__%s' % (line, condition_pair[0])
-				for line in self.compared_lines
-			]].set_index(np.array(self.compared_lines))
-		for permuted_gene_effect in permuted_gene_effects]
-
-		gene_effect_difference_permuted = [
-			gene_effect_in_alt_permuted[i] - gene_effect_in_baseline_permuted[i]
-			for i in range(len(gene_effect_in_baseline_permuted))
-		]
 
 		gene_effect_annotations = {
-			"gene_effect_nondistinguished": nondistinguished_gene_effect.stack(),
 			"gene_effect_in_%s" % condition_pair[0]: gene_effect_in_baseline.stack(),
 			"gene_effect_in_%s" % condition_pair[1]: gene_effect_in_alt.stack(),
 			"gene_effect_difference": gene_effect_difference.stack(),
 
-			"permuted_gene_effect_in_%s_min" % condition_pair[0]: pd.DataFrame(
-				np.min(
-					gene_effect_in_baseline_permuted,
-					axis=0
-				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
-			).stack(),
-
-			 "permuted_gene_effect_in_%s_min" % condition_pair[1]: pd.DataFrame(
-				np.min(
-					gene_effect_in_alt_permuted,
-					axis=0
-				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
-			 ).stack(),
-
-			"permuted_gene_effect_in_%s_max" % condition_pair[0]: pd.DataFrame(
-				np.max(
-					gene_effect_in_baseline_permuted,
-					axis=0
-				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
-			).stack(),
-
-			 "permuted_gene_effect_in_%s_max" % condition_pair[1]: pd.DataFrame(
-				np.max(
-					gene_effect_in_alt_permuted,
-					axis=0
-				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
-			 ).stack(),
-
-			"permuted_gene_effect_in_%s_mean" % condition_pair[0]: pd.DataFrame(
-				np.mean(
-					gene_effect_in_baseline_permuted,
-					axis=0
-				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
-			).stack(),
-
-			 "permuted_gene_effect_in_%s_mean" % condition_pair[1]: pd.DataFrame(
-				np.mean(
-					gene_effect_in_alt_permuted,
-					axis=0
-				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
-			 ).stack(),
-
-			"permuted_difference_sd": pd.DataFrame(
-				np.std(
-					gene_effect_difference_permuted,
-					axis=0
-				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
-			 ).stack(),
-
-			"permuted_difference_extreme": pd.DataFrame(
-				np.max(
-					np.abs(gene_effect_difference_permuted),
-					axis=0
-				), index=self.compared_lines, columns=gene_effect_in_baseline_permuted[0].columns
-			 ).stack()
-
+			
 		}
-		for key, v in gene_effect_annotations.items():
-			print(key)
-			print(v[:3])
-			print(v.shape)
-			print()
 		gene_effect_annotations = pd.DataFrame(gene_effect_annotations).reset_index()
 		gene_effect_annotations.rename(columns={
 			gene_effect_annotations.columns[0]: "cell_line_name",
@@ -543,53 +503,40 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 
 		print("calculating empirical significance")
-		statistics = self.get_significance_by_readcount_bin(
-			self.retained_readcounts, self.distinguished_map,
+		significance = self.get_significance_by_readcount_bin(
+			self.readcount_gene_totals, self.distinguished_map,
 			self.compared_lines,
-			self.observed_statistic, self.permuted_statistics,
-			tail, n_readcount_total_bins
+			self.distinguished_result, self.permuted_results,
+			tail, gene_readcount_total_bin_quantiles
 		)
 
-		return gene_effect_annotations.merge(statistics, on=["cell_line_name", "gene"],
-			how="outer")
+		return gene_effect_annotations\
+			.merge(significance, on=["cell_line_name", "gene"], how="outer")
 
 
-
-	def get_nondistinguished_results(self, condition_pair,
-			comparison_effect, **kwargs):
-		nondistinguished_map = {key: filter_sequence_map_by_condition(
-			self.condition_map[key], condition_pair)
+	def get_readcount_gene_totals(self, retained_readcounts, condition_map, guide_gene_map):
+		pdna_seqs = {key: condition_map[key].query("cell_line_name == 'pDNA'").sequence_ID
+					for key in condition_map}
+		readcount_gene_totals = sum_collapse_dataframes([
+			retained_readcounts[key]\
+						.drop(pdna_seqs[key], axis=0, errors="ignore")\
+						.groupby(guide_gene_map[key].set_index("sgrna")["gene"], axis=1)\
+						.sum()\
+						.median(axis=0)
 			for key in self.keys
-		}
-		retained_readcounts = {
-			key:self.readcounts[key].loc[nondistinguished_map[key].sequence_ID]
-			for key in self.keys
-		}
-		nondistinguished_model = Chronos(
-			 readcounts=retained_readcounts,
-			 sequence_map=nondistinguished_map,
-			 guide_gene_map=self.guide_gene_map,
-			 use_line_mean_as_reference=np.inf,
-			 **self.kwargs
-		)
-		nondistinguished_model.train(**kwargs)
-
-		nondistinguished_result = comparison_effect(nondistinguished_model)
-		nondistinguished_gene_effect = nondistinguished_model.gene_effect
-		#del nondistinguished_model
-		self.nondistinguished_model = nondistinguished_model
-
-		return nondistinguished_map, retained_readcounts, nondistinguished_result,\
-			nondistinguished_gene_effect
+		])
+		return readcount_gene_totals
 
 
 	def get_distinguished_results(self, nondistinguished_map, condition_pair,
-			comparison_effect, **kwargs
+			comparison_effect, readcount_gene_totals, **kwargs
 		):
 
 		distinguished_map = {key:
 			create_condition_sequence_map(nondistinguished_map[key], condition_pair)
 			for key in self.keys}
+
+
 		distinguished_model = Chronos(
 			readcounts=self.retained_readcounts,
 			sequence_map=distinguished_map,
@@ -599,8 +546,8 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 		)
 		distinguished_model.train(**kwargs)
 
-		distinguished_result = comparison_effect(distinguished_model)
 		distinguished_gene_effect = distinguished_model.gene_effect
+		distinguished_result = comparison_effect(distinguished_model, distinguished_map, condition_pair)
 		#del distinguished_model
 		self.distinguished_model = distinguished_model
 
@@ -632,7 +579,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 								)
 			permuted_model.train(**kwargs)
 
-			out.append(comparison_effect(permuted_model))
+			out.append(comparison_effect(permuted_model, permuted_map, condition_pair))
 			permuted_gene_effects.append(permuted_model.gene_effect)
 			del permuted_model
 
@@ -643,73 +590,29 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 		return permuted_maps, out, permuted_gene_effects
 
 
-	def get_comparison_statistic(self, nondistinguished_result, distinguished_result, 
-			permuted_results, statistic, condition_pair
-		):
-
-		observed_statistic = {}
-		permuted_statistics = []
-		for line in self.compared_lines:
-			baseline = '%s__in__%s' % (line, condition_pair[0])
-			alt = '%s__in__%s' % (line, condition_pair[1])
-
-			observed_statistic[line] = statistic(
-				nondistinguished_result.loc[line],
-				distinguished_result.loc[baseline],
-				distinguished_result.loc[alt]
-			)
-
-			permuted_diff = pd.DataFrame([
-				statistic(
-					nondistinguished_result.loc[line],
-					permuted_result.loc[baseline],
-					permuted_result.loc[alt]
-				)
-				for permuted_result in permuted_results
-			])
-			permuted_diff.index = [line] * len(permuted_diff)
-			permuted_statistics.append(permuted_diff)
-
-		permuted_statistics = pd.concat(permuted_statistics)
-		observed_statistic = pd.DataFrame(observed_statistic).T
-
-		return observed_statistic, permuted_statistics
-
-
-
-	def get_significance_by_readcount_bin(self, retained_readcounts,
+	def get_significance_by_readcount_bin(self, readcount_gene_totals,
 		distinguished_map, compared_lines, observed_statistic, permuted_statistics, 
-			tail, nbins=10,  additional_annotations={}
+			tail, gene_readcount_total_bin_quantiles,  additional_annotations={}
 		):
 
-		readcount_gene_totals = sum_collapse_dataframes([
-			retained_readcounts[key]\
-						.groupby(self.guide_gene_map[key].set_index("sgrna")["gene"], axis=1)\
-						.sum()\
-						.sum(axis=0)
-			for key in self.keys
-		])
-
-		bins = readcount_gene_totals.quantile(np.linspace(0, 1.0, nbins+1))
+		bins = readcount_gene_totals.quantile([0] + gene_readcount_total_bin_quantiles + [1])
 		bins[0] = 0
 		bins[1.0] *= 1.05
 		bins = pd.cut(readcount_gene_totals, bins)
 		out = []
+		bin_assignments = []
 
 		for line in compared_lines:
 			if line == 'pDNA':
 				continue
 			for bin in sorted(bins.unique()):
 				genes = bins.loc[lambda x: x==bin].index
+				null = pd.concat([v.loc[line, genes] for v in permuted_statistics])
 
-				null = permuted_statistics.loc[line, genes]
-				if len(null.shape) > 1:
-					null_mean = null.mean(axis=0)
-					null_max = null.max(axis=0)
-					null_min = null.min(axis=0)
-					null = null.stack()
-				else:
-					null_mean, null_min, null_max = null
+				if len(genes) < 100:
+					warn("Only %i genes in one of your bins. This will limit the minimum achievable p-value to \
+%1.1E. If you have a sub-genome library, considering changing `gene_readcount_total_bin_quantiles` so there are \
+more genes in each bin." % (len(genes), 1/(len(null)+1)))
 
 				try:
 					out.append(get_difference_significance(
@@ -722,9 +625,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 					print(permuted_statistics.loc[line, genes])
 					assert False
 				out[-1]["cell_line_name"] = line
-				out[-1]["permuted_mean_statistic"] = null_mean
-				out[-1]["permuted_min_statistic"] = null_min
-				out[-1]["permuted_max_statistic"] = null_max
+				out[-1]["total_readcount_bin"] = bin
 
 				for key, val in additional_annotations:
 					if isinstance(val, pd.Series):
@@ -737,6 +638,11 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 				out[-1].reset_index(inplace=True)
 				out[-1].rename(columns={out[-1].columns[0]: "gene"})
 		return pd.concat(out, ignore_index=True)
+
+
+################################################################
+# P R O B A B I L I T I E S
+################################################################
 
 
 def smooth(x, sigma):

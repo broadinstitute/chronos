@@ -389,14 +389,13 @@ batches, too few to estimate overdispersion.")
 
 	return alpha
 
-def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, gap_cutoff=2):
+def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, gap_cutoff=2,
+				  rpm_normalize=False):
 	'''
 	NaNs readcounts in cases where all of the following are true:
-		- The value  for the guide/replicate pair corresponds to the most positive log fold change of all guides and all replicates 
-			for a cell line
 		- The logfold change for the guide/replicate pair is greater than `absolute_cutoff`
 		- The difference between the lfc for this pair and the next most positive pair for that gene and cell line is greater than 
-			gap_cutoff
+			gap_cutoff. 
 	Readcounts are mutated in place.
 	Parameters:
 		readcounts (`pandas.DataFrame`): readcount matrix with replicates on rows, guides on columns
@@ -404,58 +403,61 @@ def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, 
 		guide_gene_map (`pandas.DataFrame`): has string columns "sequence_ID", "cell_line_name", and "pDNA_batch"
 
 	'''
+	
 	check_inputs(readcounts={'default': readcounts}, sequence_map={'default': sequence_map},
 					 guide_gene_map={'default': guide_gene_map})
+	
 	print('calculating LFC')
-	fc = calculate_fold_change(readcounts, sequence_map)
+	fc = calculate_fold_change(readcounts, sequence_map, rpm_normalize)
 	lfc = pd.DataFrame(
 		np.log2(fc.values), index=fc.index,columns=fc.columns
 	)
 
+	print("stacking and annotating LFC")
+	lfc_stack = lfc.copy()
+	lfc_stack.index.name = "sequence_ID"
+	lfc_stack.columns.name = "sgrna"
+	
+	lfc_stack = lfc_stack\
+		.stack()\
+		.reset_index()\
+		.merge(sequence_map[["sequence_ID", "cell_line_name"]], how="left", on="sequence_ID")\
+		.merge(guide_gene_map[["sgrna", "gene"]], how="left", on="sgrna")\
+		.rename(columns={0: "LFC"})\
+		.sort_values(["cell_line_name", "gene", "LFC"])\
+		.reset_index(drop=True)
 
-	print('finding maximum LFC calls')
-	ggtemp = guide_gene_map.set_index('sgrna').gene.sort_values()
-	multigenes = set(ggtemp.value_counts().loc[lambda x: x > 1].index)
-	ggtemp = ggtemp[ggtemp.isin(multigenes)]
+	print("finding group boundaries")
+	gene_transitions = np.append(lfc_stack.gene.values[:-1] != lfc_stack.gene.values[1:], True)
+	cell_transitions = np.append(lfc_stack.cell_line_name.values[:-1] != lfc_stack.cell_line_name.values[1:], True)
+	transitions = gene_transitions | cell_transitions
+	transition_indices = lfc_stack.index[transitions]
 
-	max_lfc = lfc.groupby(ggtemp, axis=1).max()
-	print("filtering")
-	potential_cols = max_lfc.columns[(max_lfc.max() > absolute_cutoff).values]
-	potential_rows = max_lfc.index[(max_lfc.max(axis=1) > absolute_cutoff).values]
-	max_lfc = max_lfc.loc[potential_rows, potential_cols]
-	ggtemp = ggtemp[ggtemp.isin(potential_cols)]
-	lfc_filtered = lfc.loc[potential_rows, ggtemp.index]
-	ggreversed = pd.Series(ggtemp.index.values, index=ggtemp.values).sort_index()
+	print("removing cases with only one guide and replicate")
+	number_lfcs = transition_indices[1:] - transition_indices[:-1]
+	to_drop = transition_indices[[transition_indices[0] == lfc_stack.index[0]] + list(number_lfcs < 2)]
+	lfc_stack.drop(to_drop, inplace=True)
+	transition_indices = sorted(set(transition_indices) - set(to_drop))
 
-	print("finding second highest LFC calls")
-	second_highest_indices = np.cumsum(ggtemp.value_counts().sort_index())-2
+	print("finding maximal values")
+	maxima = lfc_stack.LFC[transition_indices].values
+	second_maxima = lfc_stack.LFC[np.array(transition_indices).astype(np.int64)-1].values
+	gaps = maxima - second_maxima
 
-	def second_highest(x):
-		return x.values[np.argpartition(-x.values, 1)[1]]
 
-	max_row_2nd_column = lfc_filtered.T.groupby(ggtemp, axis=0).agg(second_highest).T 
+	print("making mask")
+	lfc_stack["Mask"] = False
+	bad_rows = np.array(transition_indices)[(maxima > absolute_cutoff) & (gaps > gap_cutoff)]
+	print("found %i outgrowths, %1.1E of the total" % (len(bad_rows), len(bad_rows)/len(lfc_stack)))
+	lfc_stack["Mask"].loc[bad_rows] = True
 
-	second_highest = max_row_2nd_column.loc[max_lfc.index, max_lfc.columns].values 
+	print("pivoting mask")
+	mask = pd.pivot(lfc_stack, values="Mask", index="sequence_ID", columns="sgrna")
 
-	gap = pd.DataFrame(max_lfc.values - second_highest, #second_highest
-		index=max_lfc.index, columns=max_lfc.columns)
+	print("aligning_mask")
+	mask = mask.reindex(index=readcounts.index, columns=readcounts.columns).fillna(False)
 
-	print('finding sequences and guides with outgrowth')
-
-	masked = max_lfc.copy()
-	masked[(max_lfc <= absolute_cutoff) | (gap <= gap_cutoff)] = np.nan
-	masked = masked.reindex(index=lfc_filtered.index, columns=ggtemp.values).fillna(False)
-	masked.columns = ggtemp.index
-	max_lfc_expanded = max_lfc.reindex(index=lfc_filtered.index, columns=ggtemp.values)
-	max_lfc_expanded.columns = ggtemp.index
-	mask = (lfc_filtered == max_lfc_expanded) & masked
-	mask = mask.reindex(index=readcounts.index, columns=readcounts.columns).fillna(False).astype(bool)
-
-	print("NAing %i readcounts (%1.5f of total)" % (
-		mask.sum().sum(), mask.sum().sum()/readcounts.notnull().sum().sum()
-		)
-	)
-
+	print("NaNing")
 	readcounts.mask(mask, inplace=True)
 
 
@@ -702,29 +704,29 @@ class Chronos(object):
 			nodes are exposed as properties which return properly indexed Pandas objects. 
 			
 		Properties (type `help(Chronos.<property>) to learn more):
-		    cell_efficacy
-		    cost
-		    cost_presum
-		    days
-		    estimated_fold_change
-		    full_cost
-		    gene_effect
-		    guide_efficacy
-		    growth_rate
-		    efficacy
-		    excess_variance
-		    learning_rate
-		    library_means
-		    library_effect
-		    mask
-		    measured_t0
-		    normalized_readcounts
-		    predicted_readcounts_scaled
-		    predicted_readcounts
-		    screen_delay
-		    t0
-		    t0_core
-		    t0_offset
+			cell_efficacy
+			cost
+			cost_presum
+			days
+			estimated_fold_change
+			full_cost
+			gene_effect
+			guide_efficacy
+			growth_rate
+			efficacy
+			excess_variance
+			learning_rate
+			library_means
+			library_effect
+			mask
+			measured_t0
+			normalized_readcounts
+			predicted_readcounts_scaled
+			predicted_readcounts
+			screen_delay
+			t0
+			t0_core
+			t0_offset
 		'''
 
 
@@ -796,7 +798,8 @@ class Chronos(object):
 		self.guide_efficacy_reg = float(guide_efficacy_reg)
 		self.gene_effect_L1 = float(gene_effect_L1)
 		self.gene_effect_L2 = float(gene_effect_L2)
-		self.gene_effect_hierarchical = float(gene_effect_hierarchical)
+		self._private_gene_effect_hierarchical = float(gene_effect_hierarchical)
+		self._gene_effect_hierarchical = tf.compat.v1.placeholder(dtype, shape=())
 		self.growth_rate_reg = float(growth_rate_reg)
 		self.offset_reg = float(offset_reg)
 		self.gene_effect_smoothing = float(gene_effect_smoothing)
@@ -843,7 +846,7 @@ class Chronos(object):
 
 		self._pretrained = pretrained
 		self._is_model_loaded = False
-        
+		
 
 		##################    C  R  E  A  T  E       V  A  R  I  A  B  L  E  S   #######################
 
@@ -874,9 +877,9 @@ class Chronos(object):
 		# _true_residue is this deviation after constraining v_residue to have mean 0. 
 		# _combined_gene_effect is the sum of v_mean_effect and _true_residue. This is the tensor 
 		# accessed by the attribute Chronos.gene_effect.
-		(self.v_mean_effect, self.v_residue, self._residue, self._true_residue, self._combined_gene_effect,
-			self.v_library_effect, self._library_effect
-			) = self._get_tf_gene_effect(dtype)
+		(self.v_mean_effect, self.v_residue, self._residue, self._true_residue, 
+			self._combined_gene_effect, self.v_library_effect, self._library_effect
+		) = self._get_tf_gene_effect(dtype)
 
 
 		#############################    C  O  R  E      M  O  D  E  L    ##############################
@@ -1205,7 +1208,10 @@ class Chronos(object):
 		print('initializing graph')
 		self.sess = tf.compat.v1.Session()
 		self._learning_rate = tf.compat.v1.placeholder(shape=tuple(), dtype=dtype)
-		self.run_dict = {self._learning_rate: max_learning_rate}
+		self.run_dict = {
+			self._learning_rate: max_learning_rate, 
+			self._gene_effect_hierarchical: self._private_gene_effect_hierarchical
+		}
 		self.max_learning_rate = max_learning_rate
 		self.persistent_handles = set([])
 
@@ -1254,7 +1260,7 @@ class Chronos(object):
 		with tf.compat.v1.name_scope("days"):
 			_days = {key: 
 				tf.constant(
-					  	  Chronos.default_timepoint_scale 
+						  Chronos.default_timepoint_scale 
 						* val.set_index('sequence_ID').loc[self.index_map[key]].days.astype(self.np_dtype).values, 
 					dtype=dtype, 
 					shape=(len(self.index_map[key]), 1), 
@@ -1381,7 +1387,7 @@ class Chronos(object):
 						tf.transpose(a=_t0_offset[key])
 						# for every guide, subtract the mean offset for all guides targetiing the same gene
 					  - tf.gather(
-					  		_combined_t0_offset, 
+							_combined_t0_offset, 
 							self.guide_map[key]['gather_ind_inner'], 
 							axis=1
 						)
@@ -1465,7 +1471,7 @@ class Chronos(object):
 		with tf.compat.v1.name_scope("screen_delay"):
 			v_screen_delay = tf.Variable(
 							np.sqrt(Chronos.default_timepoint_scale * initial_screen_delay) * np.ones((1, self.ngenes), dtype=self.np_dtype),
-					 		dtype=dtype, name="base")
+							dtype=dtype, name="base")
 			_screen_delay = tf.square(v_screen_delay)
 		tf.compat.v1.summary.histogram("screen_delay", _screen_delay)
 		print("built screen delay")
@@ -1493,7 +1499,7 @@ class Chronos(object):
 						(tf.reduce_mean(input_tensor=_residue, axis=0, name="sum_over_guides"))[tf.newaxis, :],
 						name="mean_centered"
 						)
-                  
+				  
 			_combined_gene_effect = tf.add(v_mean_effect, _true_residue, name="GE")
 
 			with tf.compat.v1.name_scope("library_effect"):
@@ -1527,8 +1533,12 @@ class Chronos(object):
 				_library_effect = {key: v - _library_effect_mean for key, v in _library_effect_indicated.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
+
 		print("built core gene effect: %i cell lines by %i genes" %tuple(_combined_gene_effect.get_shape().as_list()))
-		return v_mean_effect, v_residue, _residue, _true_residue, _combined_gene_effect, v_library_effect, _library_effect
+
+
+		return v_mean_effect, v_residue, _residue, _true_residue, _combined_gene_effect, \
+				v_library_effect, _library_effect
 
 
 #############################    C  O  R  E      M  O  D  E  L    ##############################
@@ -1760,7 +1770,7 @@ class Chronos(object):
 			self._L2_penalty = self.gene_effect_L2 * tf.reduce_sum(input_tensor=tf.square(self._combined_gene_effect),
 				name="L2_penalty")/self.mask_count
 
-			self._hier_penalty = self.gene_effect_hierarchical * tf.reduce_sum(input_tensor=tf.square(self._true_residue),
+			self._hier_penalty = self._gene_effect_hierarchical * tf.reduce_sum(input_tensor=tf.square(self._true_residue),
 				name="hier_penalty")/self.mask_count
 
 			self._growth_reg_cost = -self.growth_rate_reg * 1.0/len(self.keys) * tf.add_n([
@@ -1849,12 +1859,12 @@ class Chronos(object):
 		#this breaks when medians.min() == medians.quantile(q); e.g. q% of guides are at 0 median fc
 		#depleting_guides = medians.loc[lambda x: x < medians.quantile(cell_efficacy_guide_quantile)].index
 		depleting_guides = medians.loc[lambda x: x <= medians.quantile(cell_efficacy_guide_quantile)].index
-        #####
+		#####
 		# if medians.min() == medians.quantile(cell_efficacy_guide_quantile):
 		# 	depleting_guides = medians.loc[lambda x: x <= medians.quantile(cell_efficacy_guide_quantile)].index # keep
 		# else:
 		# 	depleting_guides = medians.loc[lambda x: x < medians.quantile(cell_efficacy_guide_quantile)].index   
-        #####
+		#####
 		cell_efficacy = 1 - fc[depleting_guides].median(axis=1)
 		if (cell_efficacy <=0 ).any() or (cell_efficacy > 1).any() or cell_efficacy.isnull().any():
 			raise RuntimeError("estimated efficacy outside bounds. \n%r\n%r" % (cell_efficacy.sort_values(), fc))
@@ -1933,10 +1943,10 @@ class Chronos(object):
 				print(self.sess.run(
 					(
 							self._normalized_readcounts[key]+1e-6) 
-					 	* tf.math.log(self._excess_variance_expanded[key] 
-					 	* (self._normalized_readcounts[key] + 1e-6) 
+						* tf.math.log(self._excess_variance_expanded[key] 
+						* (self._normalized_readcounts[key] + 1e-6) 
 					 ), 
-					 	self.run_dict)
+						self.run_dict)
 				)
 				raise ValueError("%i nulls found in self._cost_presum[%s]" % (pd.isnull(df).sum().sum(), key))
 			print('\t' + key + ' _cost')
@@ -1960,8 +1970,8 @@ class Chronos(object):
 		'''
 		return {
 			key: np.concatenate(self.guide_gene_map[key].groupby("gene").sgrna.apply(lambda x: 
-                                      np.random.choice(x, size=int(np.ceil(len(x)/3)), replace=False)
-                                     ).values)
+									  np.random.choice(x, size=int(np.ceil(len(x)/3)), replace=False)
+									 ).values)
 			for key in self.keys
 		}
 
@@ -2051,7 +2061,7 @@ class Chronos(object):
 		'''
 		if self._pretrained != self._is_model_loaded:
 			raise RuntimeError("Model is built to use a pretrained model, but no model was loaded. Please use model.load()")        
-        
+		
 		rates = np.exp(np.linspace(np.log(starting_learn_rate), np.log(self.max_learning_rate), burn_in_period))
 		start_time = time()
 		start_epoch = self.epoch
@@ -2103,8 +2113,8 @@ class Chronos(object):
 
 
 #########################               I  /  O              ###################################           
-                
-                
+				
+				
 	def load(self, gene_effect, guide_efficacy, t0_offset, screen_delay, cell_efficacy, 
 		library_effect):
 		'''
@@ -2113,17 +2123,17 @@ class Chronos(object):
 		if self._pretrained != True:
 			raise RuntimeError("Model is built to train without existing data. \
 To load a pretrained model, you must reinitialize Chronos with `pretrained=True`")
-        
-        # convert cell_line_efficacy output into dictionary of cell lines to sets of library names
+		
+		# convert cell_line_efficacy output into dictionary of cell lines to sets of library names
 		cells_to_libraries_screened = dict()
 		for cell_id in cell_efficacy.index:
-            # only keep the libraries that are present in the newest data (self.keys)
+			# only keep the libraries that are present in the newest data (self.keys)
 			cells_to_libraries_screened[cell_id] = set(
 				cell_efficacy\
 				.loc[cell_id, ~cell_efficacy.loc[cell_id, :].isna()]\
 				.index
 			).intersection(self.keys)
-        
+		
 		missing = set(self.keys) - set.union(*[libs for libs in cells_to_libraries_screened.values()])
 		if len(missing):
 			raise ValueError(
@@ -2131,7 +2141,7 @@ To load a pretrained model, you must reinitialize Chronos with `pretrained=True`
 that includes all the libraries in the new screen(s), run Chronos without a pretrained model, or exclude those libraries from \
 your data" % missing
 			)
-        
+		
 		mask = {}
 		for cell in self.all_cells:
 			if cell in cells_to_libraries_screened:
@@ -2152,23 +2162,23 @@ your data" % missing
 		self._gene_effect_mask = _gene_effect_mask
 		self.mask_count = mask_count
 
-        # want to use the gene_effect matrix and not v_mean_effect's mean because the training data's masking is relevant
+		# want to use the gene_effect matrix and not v_mean_effect's mean because the training data's masking is relevant
 		means = gene_effect.mean().reindex(index=self.all_genes).values.reshape(1, -1)
 		self.sess.run(self.v_mean_effect.assign(means))
-        
+		
 		self.guide_efficacy = guide_efficacy
 
 		self.t0_offset = t0_offset
-        
+		
 		self.screen_delay = screen_delay
-        
+		
 		self.library_effect = library_effect
-        
+		
 		self._is_model_loaded = True
 		print('Chronos model loaded')
 		print('ready to train')
-    
-    
+	
+	
 	def import_model(self, directory):
 		'''
 		Quickly load a subset of Chronos parameters from a directory. 
@@ -2207,8 +2217,8 @@ your data" % missing
 			screen_delay = pd.Series(3, index=gene_effect.columns)
 		library_effect = pd.read_csv(os.path.join(directory, 'library_effect.csv'), index_col=0)        
 		self.load(gene_effect, guide_efficacy, t0_offset, screen_delay, cell_line_efficacy, library_effect)
-           
-        
+		   
+		
 
 	def save(self, directory, overwrite=False, include_inputs=True, include_outputs=True):
 		'''
@@ -2442,7 +2452,7 @@ your data" % missing
 		return {key: pd.DataFrame(self.sess.run(self._cost_presum[key], self.run_dict), 
 							  index=self.index_map[key], columns=self.column_map[key])
 				for key in self.keys}
-    
+	
 
 	@property
 	def days(self):
@@ -2471,7 +2481,7 @@ your data" % missing
 		}
 		return {
 			key: pd.DataFrame(
-				  	output[key].values \
+					output[key].values \
 					/ measured_t0[key].loc[mapper[key]].values,
 				index=output[key].index, 
 				columns=output[key].columns
@@ -2518,6 +2528,15 @@ your data" % missing
 		residue = pd.DataFrame(de.values - means).fillna(0).values
 		self.sess.run(self.v_mean_effect.assign(means))
 		self.sess.run(self.v_residue.assign(residue))
+
+
+	@property
+	def gene_effect_hierarchical(self):
+		return self.run_dict[self._gene_effect_hierarchical]
+
+	@gene_effect_hierarchical.setter
+	def gene_effect_hierarchical(self, desired_gene_effect_hierarchical):
+		self.run_dict[self._gene_effect_hierarchical] = desired_gene_effect_hierarchical
 		
 
 	@property
