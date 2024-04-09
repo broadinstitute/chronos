@@ -321,8 +321,7 @@ def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_li
 		label_y = np.array([y[label] for label in label_specific])
 		plt.scatter(label_x, label_y, **outlier_scatter_kws)
 		if adjust_text_present and len(texts) > 0:
-			adjust_text(texts, expand_text=(1.1, 1.5),
-				lim=500,
+			adjust_text(texts, lim=500,
 				arrowprops=dict(arrowstyle="-", color=[.7, .5, .5]),
 				#x=outlier_x, y=outlier_y
 				)

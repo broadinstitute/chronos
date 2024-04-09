@@ -8,6 +8,7 @@ from itertools import permutations
 from scipy.stats import gaussian_kde, norm
 from scipy.interpolate import interp1d
 from scipy.signal import argrelextrema
+from sympy.utilities.iterables import multiset_permutations
 
 
 def cell_line_log_likelihood(model, distinguished_condition_map):
@@ -22,6 +23,32 @@ def cell_line_log_likelihood(model, distinguished_condition_map):
 		for key, v in cost_presum.items()
 	]
 	return -sum_collapse_dataframes(cost_presum)
+
+
+def unique_permutations(array):
+	out = list(np.array([v for v in multiset_permutations(array)]))
+	#exclude the trivial permutation
+	return [v for v in out if not np.all(v == array)]
+
+
+def unique_permutations_no_reversed(array):
+	unique = np.unique(array)
+	assert len(unique) == 2, "Array must have exactly two unique values"
+	mapper = {val: bool(i) for i, val in enumerate(unique)}
+	bool_array = np.array([mapper[val] for val in array])
+	perms = unique_permutations(bool_array)
+	out = []
+	mirror = set([
+		tuple(bool_array),
+		tuple(~bool_array)
+		])
+	for perm in perms:
+		reverse = tuple(~perm)
+		if not reverse in mirror:
+			mirror.add(tuple(perm))
+			out.append(unique[perm.astype(int)])
+	return out
+
 
 
 def reverse_gene_effect(gene_effect, distinguished_condition_map, condition_pair):
@@ -135,7 +162,8 @@ def get_difference_significance(observed, null, tail):
 def filter_sequence_map_by_condition(condition_map, condition_pair=None):
 	'''
 	Given a pair of conditions, removes cell lines from the `condition_map` without
-	at least two replicates per condition and returns the new map.
+	at least two replicates per condition and returns the new map. Replicates are filtered
+	so that there is an even and equal number in each condition.
 	'''
 	out = condition_map.copy()
 		
@@ -177,7 +205,25 @@ in `condition_pair`: %r/n/n%r" % (condition_pair, condition_map))
 		out = out[~out.cell_line_name.isin(to_drop)]
 
 	out = out[out.condition.isin(condition_pair) | (out.cell_line_name == 'pDNA')]
-	return out
+
+	#balance the number of replicates in each condition
+	retain_sequences = []
+	for line, group in out.groupby("cell_line_name"):
+		if line == 'pDNA':
+			retain_sequences.extend(list(group.sequence_ID))
+			continue
+		n_replicates = group.groupby("condition").replicate.nunique().min()
+		if n_replicates % 2:
+			n_replicates -= 1
+		for condition, subgroup in group.groupby("condition"):
+			retain_replicates = subgroup.replicate.unique()[:n_replicates]
+			retain_sequences.extend(list(
+				subgroup\
+					.query("replicate in %r" % list(retain_replicates))\
+					.sequence_ID
+			))
+
+	return out[out.sequence_ID.isin(retain_sequences)].copy()
 
 
 def create_condition_sequence_map(condition_map, condition_pair=None):
@@ -185,7 +231,7 @@ def create_condition_sequence_map(condition_map, condition_pair=None):
 	Returns a new map filtered for `condition` in `condition_pair` with cell lines having fewer
 	than 2 replicates in either condition removed, where `cell_line_name` has "__in__<condition>" appended.
 	'''
-	out = filter_sequence_map_by_condition(condition_map, condition_pair)
+	out = condition_map.copy()
 	out['true_cell_line_name'] = out['cell_line_name'].copy()
 	
 	def cell_line_overwrite(x):
@@ -196,28 +242,6 @@ def create_condition_sequence_map(condition_map, condition_pair=None):
 	
 	return out
 
-
-def unique_permutations(array):
-	out = []
-	for v in permutations(array):
-		arr = np.array(v)
-		if any([np.all(arr == o) for o in out]) or np.all(arr == array) or ~np.any(arr == array):
-			continue
-		out.append(arr)
-	return out
-
-
-def unique_permutations_no_reversed(array):
-	out = []
-	for v in permutations(array):
-		arr = np.array(v)
-		if any([np.all(arr == o) for o in out]) or np.all(arr == array) \
-				or ~np.any(arr == array) or any([~np.any(arr == o) for o in out]):
-			continue
-		out.append(arr)
-	return out
-
-
 	
 def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reverse=False):
 	'''
@@ -226,6 +250,7 @@ def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reve
 	mirror image are never returned. If `allow_reverse` is False,
 	mirroring permutations are discarded. E.g. if `condition` in `condition_map` is ['A', 'A', 'B', 'B'],
 	only ['A', 'B', 'A', 'B'] and ['A', 'B', 'B', 'A'] are returned.
+	Additionally, only permutations with an equal number of replicates from each condition are retained.
 	'''
 	seq_map = filter_sequence_map_by_condition(condition_map, condition_pair)
 
@@ -238,12 +263,6 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 	#drop days column for identifying possible permutations
 	days_map = seq_map[['cell_line_name','days']].drop_duplicates()
 	base = seq_map.drop(columns=['days','sequence_ID']).drop_duplicates()
-		
-	#allow us to detect and exclude permutations that exactly reverse the label assignments
-	base["reverse_condition"] = np.nan
-	for i in range(2):
-		ind = base[base.condition == condition_pair[i]].index
-		base.loc[ind, "reverse_condition"] = condition_pair[1-i]
 	
 	splits = base.groupby('cell_line_name')
 	stack = {}
@@ -251,7 +270,7 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 		y['cell_line_name'] = line
 		
 		if line == 'pDNA':
-			pdna = y
+			pdna = y.copy()
 			pdna["true_condition"] = pdna["condition"]
 			continue
 
@@ -262,10 +281,17 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 			perms = unique_permutations_no_reversed(y.condition)
 
 		for perm in perms:
-				stack[line].append(y.copy())
-				stack[line][-1]["true_condition"] = stack[line][-1]["condition"]
-				stack[line][-1]["condition"] = perm
-				stack[line][-1]["cell_line_name"] = line
+				tentative = y.copy()
+				tentative["true_condition"] = tentative["condition"]
+				tentative["condition"] = perm
+				tentative["cell_line_name"] = line
+
+				#check that the pseudo conditions have equal numbers of replicates from each real condition
+				condition_counts = tentative.groupby("condition").true_condition.value_counts()
+				if \
+						len(condition_counts) == 4 \
+					 and condition_counts.min() == condition_counts.max():
+					stack[line].append(tentative)
 
 	min_unique_permutations = min(len(v) for v in stack.values())
 	out = []
@@ -310,7 +336,8 @@ class ConditionComparison():
 			"likelihood": change_in_likelihood
 	}
 
-	def __init__(self, readcounts, condition_map, guide_gene_map, **kwargs):
+	def __init__(self, readcounts, condition_map, guide_gene_map,
+		print_to=None, **kwargs):
 		'''
 		Initialize the comparator.
 		Parameters:
@@ -331,6 +358,7 @@ class ConditionComparison():
 		self.readcounts = readcounts
 		self.condition_map = condition_map
 		self.guide_gene_map = guide_gene_map
+		self.print_to = print_to
 		self.kwargs = kwargs
 		self.keys = sorted(self.readcounts.keys())
 
@@ -358,10 +386,10 @@ every map.")
 		return condition_pair
 
 
-	def compare_conditions(self, condition_pair=None, comparison_effect="likelihood",
-		 tail="right", gene_readcount_total_bin_quantiles=[0.025, .3], 
-		allow_reversed_permutations=None,
-			max_null_iterations=20, 
+	def compare_conditions(self, condition_pair=None,
+		gene_readcount_total_bin_quantiles=[0.05], 
+		allow_reversed_permutations=False,
+			max_null_iterations=20,
 				**kwargs):
 		'''
 		Generate a table with the significance of differences in gene effect between two conditions.
@@ -378,26 +406,16 @@ every map.")
 		Parameters:
 			`condition_pair` (iteranble of len 2 or None): the two conditions to be compared. If None,
 				requires that `self.condition_map` have only two uniue conditions for non-pDNA entries.
-			`comparison_effect`: "gene_effect", "likelihood", or a function that takes in a Chronos
-				instance, a condition map (`dict` of `pandas.DataFrame`), and a condition pair 
-				(`tuple` of `str`) and returns a cell line-by-gene matrix of differences.
-				If `likelihood`, the values are the difference in log likelihood when the model
-				uses its fitted gene effect for cell line in each condition vs the gene effect
-				of the same cell line in the opposite condition.
-			`tail`: ("left", "right", or "both"): which tails to test the p-value in. If "likelihood"
-				is chosen as the comparison effect, this should be "right". If gene effect, 
-				you may want to test "both".
-			`n_readcount_total_bins`: gene effect estimates for genes informed by few total reads are
+			`gene_readcount_total_bin_quantiles`: gene effect estimates for genes informed by few total reads are
 				noisier than those with abundant reads. Therefore, when calculating p-values, genes
-				will be binned by total readcounts in even quantiles. More bins improves control of 
-				false discovery in common essential genes, but at the price of raising the minimum 
+				will be binned by total readcounts according to the quantiles passed here. 0 and 1 are assumed.
+				 More bins improves control of false discovery in common essential genes, but at the price of raising the minimum 
 				achievable p value (which is 1/number of samples in the null distribution).
-			`allow_reversed-permutations` (`bool` or `None`): whether to allow permutations that are 
+			`allow_reversed-permutations` (`bool`): whether to allow permutations that are 
 				mirror images of each other - e.g. if ['A', 'B', 'A', 'B'] is one permutation, whether 
 				to also include ['B', 'A', 'B', 'A']. Mirror image permutations will cause Chronos to
 				estimate highly similar gene effects, just with the condition labels swapped. Thus,
-				the permutations are no longer independently distributed. Therefore using reversed
-				permutations will give falsely optimistic p-values for measures such as likelihood.
+				the permutations are no longer independently distributed. 
 			`max_null_permutations` (`int`): limits the number of permutations used in the null, useful
 				in the case that there are many replicates in each cell line.
 		Returns:
@@ -424,22 +442,6 @@ every map.")
 				`permuted_<min, max, mean>_statistic`: as `observed_statistic`, summarized over the permutations
 
 		'''
-		if isinstance(comparison_effect, str):
-			comparison_effect = self.comparison_effect_dict[comparison_effect]
-		if not callable(comparison_effect):
-			raise ValueError("`comparison_effect` must be a callable that accepts `Chronos`\
-isntances or one of %r" % list(self.comparison_effect_dict.keys())
-			)
-
-		if allow_reversed_permutations is None:
-			# in the one tailed tests, counting conditions where the permutations have been completely
-			# flipped is cheating
-			if tail == "right" or tail == "left":
-				allow_reversed_permutations = False
-			elif tail == "both":
-				allow_reversed_permutations = True
-			else:
-				raise ValueError("`tail` must be 'left', 'right', or 'both'")
 
 		condition_pair = self._check_condition_pair(condition_pair)
 
@@ -461,15 +463,15 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 		print("training model with conditions distinguished")
 		self.distinguished_map, self.distinguished_result, \
 			distinguished_gene_effect = self.get_distinguished_results(
-			self.nondistinguished_map, condition_pair, comparison_effect, 
+			self.nondistinguished_map, condition_pair,
 			self.readcount_gene_totals, **kwargs
 		)
 
-		print("training model with permuted conditions")
+		print("training models with permuted conditions")
 		self.permuted_maps, self.permuted_results, \
 			permuted_gene_effects = self.get_permuted_results(
 			max_null_iterations, self.nondistinguished_map, condition_pair, 
-			comparison_effect, allow_reversed_permutations, **kwargs
+			allow_reversed_permutations, **kwargs
 		)
 
 
@@ -507,7 +509,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			self.readcount_gene_totals, self.distinguished_map,
 			self.compared_lines,
 			self.distinguished_result, self.permuted_results,
-			tail, gene_readcount_total_bin_quantiles
+			gene_readcount_total_bin_quantiles
 		)
 
 		return gene_effect_annotations\
@@ -529,7 +531,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 
 	def get_distinguished_results(self, nondistinguished_map, condition_pair,
-			comparison_effect, readcount_gene_totals, **kwargs
+			readcount_gene_totals, **kwargs
 		):
 
 		distinguished_map = {key:
@@ -542,12 +544,17 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 			sequence_map=distinguished_map,
 			guide_gene_map=self.guide_gene_map,
 			 use_line_mean_as_reference=np.inf,
+			 print_to=self.print_to,
 			**self.kwargs
 		)
 		distinguished_model.train(**kwargs)
 
 		distinguished_gene_effect = distinguished_model.gene_effect
-		distinguished_result = comparison_effect(distinguished_model, distinguished_map, condition_pair)
+		distinguished_result = {comparison_effect: func(
+				distinguished_model, distinguished_map, condition_pair
+			)
+			for comparison_effect, func in self.comparison_effect_dict.items()
+		}
 		#del distinguished_model
 		self.distinguished_model = distinguished_model
 
@@ -555,7 +562,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 
 	def get_permuted_results(self, max_null_iterations, nondistinguished_map, condition_pair, 
-			comparison_effect, allow_reversed_permutations, **kwargs
+			allow_reversed_permutations, **kwargs
 		):
 
 		permuted_maps = {
@@ -575,11 +582,16 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 								 sequence_map=permuted_map,
 								 guide_gene_map=self.guide_gene_map,
 								  use_line_mean_as_reference=np.inf,
+								  print_to=self.print_to,
 								**self.kwargs
 								)
 			permuted_model.train(**kwargs)
 
-			out.append(comparison_effect(permuted_model, permuted_map, condition_pair))
+			out.append({comparison_effect: func(
+					permuted_model, permuted_map, condition_pair
+				)
+				for comparison_effect, func in self.comparison_effect_dict.items()
+			})
 			permuted_gene_effects.append(permuted_model.gene_effect)
 			del permuted_model
 
@@ -592,7 +604,7 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 
 	def get_significance_by_readcount_bin(self, readcount_gene_totals,
 		distinguished_map, compared_lines, observed_statistic, permuted_statistics, 
-			tail, gene_readcount_total_bin_quantiles,  additional_annotations={}
+			gene_readcount_total_bin_quantiles,  additional_annotations={}
 		):
 
 		bins = readcount_gene_totals.quantile([0] + gene_readcount_total_bin_quantiles + [1])
@@ -607,23 +619,27 @@ isntances or one of %r" % list(self.comparison_effect_dict.keys())
 				continue
 			for bin in sorted(bins.unique()):
 				genes = bins.loc[lambda x: x==bin].index
-				null = pd.concat([v.loc[line, genes] for v in permuted_statistics])
+				
 
 				if len(genes) < 100:
-					warn("Only %i genes in one of your bins. This will limit the minimum achievable p-value to \
-%1.1E. If you have a sub-genome library, considering changing `gene_readcount_total_bin_quantiles` so there are \
-more genes in each bin." % (len(genes), 1/(len(null)+1)))
+					warn("Only %i genes in one of your bins. This will limit the minimum achievable p-value \
+. If you have a sub-genome library, considering changing `gene_readcount_total_bin_quantiles` so there are \
+more genes in each bin." % (len(genes)))
 
-				try:
-					out.append(get_difference_significance(
-						observed_statistic.loc[line, genes], 
+				significance = []
+				for comparison_effect in self.comparison_effect_dict:
+					null = pd.concat([v[comparison_effect].loc[line, genes] for v in permuted_statistics]) 
+					significance.append(get_difference_significance(
+						observed_statistic[comparison_effect].loc[line, genes], 
 						null,
-						tail
+						tail="both"
 					))
-				except:
-					print(observed_statistic.loc[line, genes])
-					print(permuted_statistics.loc[line, genes])
-					assert False
+					significance[-1].rename(columns={
+						col: "%s_%s" % (comparison_effect, col) 
+						for col in significance[-1].columns
+					}, inplace=True)
+
+				out.append(pd.concat(significance, axis=1))
 				out[-1]["cell_line_name"] = line
 				out[-1]["total_readcount_bin"] = bin
 

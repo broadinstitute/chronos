@@ -7,13 +7,14 @@ extras_require = {
 	"adjust_text": ["adjustText"],
 	"embedding": ["umap-learn>=0.5.3"],
 	"reports": ["reportlab>=3.6"],
-	"model": ["numpy>=1.2", "pandas>=1.3", "tensorflow>2", "h5py>=3.7"]
+	"model": ["numpy>=1.2", "pandas>=1.3", "tensorflow>2", "h5py>=3.7"],
+	"hit_calling": ["scipy>=1.9", "sympy>=1.0", "statsmodels>=0.13"]
 }
 extras_require['all'] = sorted(set.union(*[set(v) for v in extras_require.values()]))
 
 setup(
 	name='crispr_chronos',
-	version='2.2.2',
+	version='2.2.3',
 	author="BroadInstitute CDS",
 	description="Time series modeling of CRISPR perturbation readcounts in biological data",
 	packages=find_packages(),

@@ -761,7 +761,7 @@ def selective_mutated_vs_not_scatter(gene_effect, mutation_matrix,
 		texts = [plt.text(s=neg_means.index[i],x=neg_means[i], y=pos_means[i], fontsize=6, color=[.8, .3, .05]) for i in outliers]
 		if adjustText_present:
 			adjust_text(texts, x=neg_means.values, y=pos_means.values, arrowprops=dict(lw=1, arrowstyle="-", color="black"),
-				expand_points=(2, 2.5))
+				)
 	xlim = plt.gca().get_xlim()
 	ylim = plt.gca().get_ylim()
 	plt.plot(
