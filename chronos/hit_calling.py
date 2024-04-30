@@ -333,7 +333,7 @@ class ConditionComparison():
 	'''
 	comparison_effect_dict = {
 			"gene_effect": change_in_gene_effect,
-			"likelihood": change_in_likelihood,
+			"likelihood": change_in_likelihood
 	}
 	# which tails to test the p-value in for each comparison effect
 	comparison_effect_tail_dict = {
