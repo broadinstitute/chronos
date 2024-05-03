@@ -94,8 +94,8 @@ def change_in_gene_effect(model, distinguished_condition_map, condition_pair):
 	# get unique lines allowing for someone deciding to put "__in__" in their base cell line name
 	all_lines = set(['__in__'.join(s.split('__in__')[:-1]) for s in ge.index])
 	out = {
-		line: ge.loc["%s__in__%s" % (line, condition_pair[0])]
-			- ge.loc["%s__in__%s" % (line, condition_pair[1])]
+		line: ge.loc["%s__in__%s" % (line, condition_pair[1])]
+			- ge.loc["%s__in__%s" % (line, condition_pair[0])]
 		for line in all_lines
 	}
 	return pd.DataFrame(out).T
@@ -334,6 +334,11 @@ class ConditionComparison():
 	comparison_effect_dict = {
 			"gene_effect": change_in_gene_effect,
 			"likelihood": change_in_likelihood
+	}
+	# which tails to test the p-value in for each comparison effect
+	comparison_effect_tail_dict = {
+			"gene_effect": "both",
+			"likelihood": "right"
 	}
 
 	def __init__(self, readcounts, condition_map, guide_gene_map,
@@ -627,12 +632,12 @@ every map.")
 more genes in each bin." % (len(genes)))
 
 				significance = []
-				for comparison_effect in self.comparison_effect_dict:
+				for comparison_effect, tail in self.comparison_effect_tail_dict.items():
 					null = pd.concat([v[comparison_effect].loc[line, genes] for v in permuted_statistics]) 
 					significance.append(get_difference_significance(
 						observed_statistic[comparison_effect].loc[line, genes], 
 						null,
-						tail="both"
+						tail=tail
 					))
 					significance[-1].rename(columns={
 						col: "%s_%s" % (comparison_effect, col) 
