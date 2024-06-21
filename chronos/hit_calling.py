@@ -668,7 +668,7 @@ every map.")
 				for v in permuted_likelihoods], ignore_index=True)
 			observed = distinguished_likelihood.loc[line] - undistinguished_likelihood.loc[line]
 
-			p = empirical_pvalue(observed, null)
+			p = empirical_pvalue(observed, null, direction=1)
 			# use the lognormal model for the null to extend p-values beyond most extreme null value
 			intercept, s = fit_weighted_lognorm(null)
 			p2 = lognorm_likelihood_p(observed, intercept, s)
