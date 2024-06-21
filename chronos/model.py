@@ -723,7 +723,7 @@ class Chronos(object):
 								the median in the pDNA batch. 
 			use_line_mean_as_reference (`int`): passed to `estimate_alpha`
 			print_to (`str` or `None`): where to print ordinary messages from Chronos. Default is `stdout`. Pass a file path to print
-								to the file or 
+								to the file or `None` to skip these messages.
 
 		Attributes:
 			Attributes beginning wit "v_" are tensorflow variables, and attributes beginning with _ are 
