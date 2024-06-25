@@ -431,6 +431,7 @@ every map.")
 	def compare_conditions(self, condition_pair=None,
 		allow_reversed_permutations=False,
 			max_null_iterations=2,
+			gene_readcount_total_bin_quantiles=[.05],
 				**kwargs):
 		'''
 		Generate a table with the significance of differences in gene effect between two conditions.
@@ -447,6 +448,11 @@ every map.")
 		Parameters:
 			`condition_pair` (iteranble of len 2 or None): the two conditions to be compared. If None,
 				requires that `self.condition_map` have only two uniue conditions for non-pDNA entries.
+			`gene_readcount_total_bin_quantiles`: gene effect estimates for genes informed by few total reads are
+				noisier than those with abundant reads. Therefore, when calculating p-values, genes
+				will be binned by total readcounts according to the quantiles passed here. 0 and 1 are assumed.
+				 More bins improves control of false discovery in common essential genes, but at the price of raising the minimum 
+				achievable p value (which is 1/number of samples in the null distribution).
 			`allow_reversed-permutations` (`bool`): whether to allow permutations that are 
 				mirror images of each other - e.g. if ['A', 'B', 'A', 'B'] is one permutation, whether 
 				to also include ['B', 'A', 'B', 'A']. Mirror image permutations will cause Chronos to
@@ -515,7 +521,8 @@ every map.")
 		self.permuted_maps, self.permuted_likelihoods, \
 			permuted_gene_effects = self.get_permuted_results(
 			max_null_iterations, self.nondistinguished_map, condition_pair, 
-			allow_reversed_permutations, **kwargs
+			allow_reversed_permutations,
+			**kwargs
 		)
 
 
@@ -550,11 +557,16 @@ every map.")
 
 		print("calculating empirical significance")
 		significance = self.get_significance(
+			gene_readcount_total_bin_quantiles,
+			self.readcount_gene_totals,
 			self.distinguished_map,
 			self.compared_lines,
 			self.undistinguished_likelihood,
-			self.distinguished_likelihood, self.permuted_likelihoods
+			self.distinguished_likelihood, 
+			self.permuted_likelihoods
 		)
+
+		significance["likelihood_fdr"] = fdrcorrection(significance["likelihood_pval"], .05)[1]
 
 		return gene_effect_annotations\
 			.merge(significance, on=["cell_line_name", "gene"], how="outer")
@@ -652,21 +664,41 @@ every map.")
 		return permuted_maps, out, permuted_gene_effects
 
 
-	def get_significance(self,
-			distinguished_map, compared_lines, 
-			undistinguished_likelihood, distinguished_likelihood, permuted_likelihoods, 
+	def get_significance(self, 
+			gene_readcount_total_bin_quantiles, 
+			readcount_gene_totals,
+			distinguished_map, 
+			compared_lines,
+			undistinguished_likelihood, 
+			distinguished_likelihood, 
+			permuted_likelihoods, 
 			additional_annotations={}
 		):
 
+		bins = readcount_gene_totals.quantile([0] + list(gene_readcount_total_bin_quantiles) + [1])
+		bins[0] = 0
+		bins[1.0] *= 1.05
+		bins = pd.cut(readcount_gene_totals, bins)
+
 		out = []
+		bin_assignments = []
+
 		for line in compared_lines:
 			if line == 'pDNA':
 				continue
-		
+
+			for bin in sorted(bins.unique()):
+				genes = bins.loc[lambda x: x==bin].index
+
+				if len(genes) < 100:
+					warn("Only %i genes in one of your bins. This will limit the minimum achievable p-value \
+	. If you have a sub-genome library, considering changing `gene_readcount_total_bin_quantiles` so there are \
+	more genes in each bin." % (len(genes)))
+
 			significance = []
-			null = pd.concat([v.loc[line] - undistinguished_likelihood.loc[line] 
+			null = pd.concat([v.loc[line, genes] - undistinguished_likelihood.loc[line, genes] 
 				for v in permuted_likelihoods], ignore_index=True)
-			observed = distinguished_likelihood.loc[line] - undistinguished_likelihood.loc[line]
+			observed = distinguished_likelihood.loc[line, genes] - undistinguished_likelihood.loc[line, genes]
 
 			p = empirical_pvalue(observed, null, direction=1)
 			# use the lognormal model for the null to extend p-values beyond most extreme null value
@@ -680,8 +712,8 @@ every map.")
 				"likelihood_permutation_0": permuted_likelihoods[0].loc[line],
 				"likelihood_permutation_1": permuted_likelihoods[1].loc[line],
 				"likelihood_pval": p, 
-				"p2": p2,
-				"cell_line_name": line
+				"cell_line_name": line,
+				"readcount_bin": bin
 			}))
 
 			for key, val in additional_annotations:
