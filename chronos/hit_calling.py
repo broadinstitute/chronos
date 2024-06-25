@@ -630,7 +630,7 @@ every map.")
 		permuted_gene_effects = []
 		counts = 0
 		for i, permuted_map in enumerate(permuted_maps):
-			print('\n\n&&&&&&&&&&&&&&&&\nrandom iteration %i\n&&&&&&&&&&&&&&&&\n\n' %i)
+			print('\trandom iteration %i' %i)
 				
 			permuted_model = Chronos(readcounts=self.retained_readcounts, 
 								 sequence_map=permuted_map,
@@ -679,7 +679,7 @@ every map.")
 				"likelihood_undistinguished": undistinguished_likelihood.loc[line],
 				"likelihood_permutation_0": permuted_likelihoods[0].loc[line],
 				"likelihood_permutation_1": permuted_likelihoods[1].loc[line],
-				"likelihood_p": p, 
+				"likelihood_pval": p, 
 				"p2": p2,
 				"cell_line_name": line
 			}))
