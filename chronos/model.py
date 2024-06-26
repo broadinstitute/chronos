@@ -5,7 +5,7 @@ import os
 import shutil
 import copy
 from time import time
-from datetime import timedelta
+from datetime import timedelta, datetime
 import h5py
 from itertools import chain, combinations
 import json
@@ -13,6 +13,30 @@ from warnings import warn
 
 if tf.__version__ < "2":
 	raise ImportError("Chronos requires tensorflow 2 or greater. Your version is %s." % tf.__version__)
+
+
+class StdoutRedirector():
+	'''
+	simple widget to control print calls
+	'''
+	def __init__(self, output="stdout"):
+		self.output = output
+		if isinstance(output, str) and not (output == "stdout"):
+			with open(output, "w") as f:
+				current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+				f.write("beginning log: %s\n" % current_time)
+
+	def print(self, *string):
+		if self.output == "stdout":
+			print(*string)
+		elif isinstance(self.output, str):
+			with open(self.output, "a") as f:
+				f.write('\t'.join(string) + "\n")
+		elif self.output is None:
+			pass
+		else:
+			raise ValueError("`output` for printing must be 'stdout', a file path, \
+or `None`")
 
 
 tf.compat.v1.disable_eager_execution()
@@ -210,8 +234,8 @@ def moving_average(a, n=3) :
 	return ret[n - 1:] / n
 
 def venter_mode(x, exclude=.1, windows=10):
-	if (x > 0).sum() < 500:
-		print("%s has less than 500 nonzero entries, returning median instead of mode" % x.name)
+	if (x > 0).sum() < 2000:
+		warn(f'{x.name} has less than 2000 nonzero entries, returning median instead of mode')
 		return x.median()
 	sort_x = x[x > 0].sort_values()
 	window = len(sort_x)//windows
@@ -220,6 +244,7 @@ def venter_mode(x, exclude=.1, windows=10):
 	interval_start = np.argmin(rolling[trim:-trim])+trim
 
 	return sort_x.iloc[interval_start:interval_start+window].mean()
+
 
 def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=None):
 	'''
@@ -239,16 +264,17 @@ def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=
 													median of negative controls in each replicate matches the median
 													of the negative controls in the corresponding pDNA batch
 	'''
-	if readcounts.shape[1] < 2000:
-		print("Readcounts has less than 2000 guides, using median normalization")
-		return (readcounts.T / readcounts.T.median()).T
-	elif negative_control_sgrnas is None:
-		print("No negative control sgRNAs supplied, aligning modes")
+	
+	if negative_control_sgrnas is None:
+		warn("No negative control sgRNAs supplied, aligning modes")
 		return (
 				readcounts.mean().mean()*(
 				readcounts.T / 2.0**(np.log2(readcounts+1).T.apply(venter_mode))
 			).T)
-	
+	if not len(negative_control_sgrnas):
+		raise ValueError("set of negative_control_sgrnas is empty")
+	if not len(set(negative_control_sgrnas) & set(readcounts.columns)):
+		raise RuntimeError("None of the negative control sgrnas were found in the columns of readcounts")
 	# Else, negative controls present:
 	if len(set(negative_control_sgrnas) - set(readcounts.columns)):
 		raise ValueError(
@@ -286,10 +312,6 @@ def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=
 									   index=repbatch.index, columns=repbatch.columns))
 
 	logged_reps = pd.concat(logged_reps, axis=0)
-	logged_reps += logged.loc[rep_ids, negative_control_sgrnas].median().median() \
-					- logged_reps.loc[:, negative_control_sgrnas].median().median()
-	logged_pdna += logged.loc[rep_ids, negative_control_sgrnas].median().median() \
-					- logged_pdna[negative_control_sgrnas].median().median()
 	
 	
 	assembled = pd.concat([logged_pdna, logged_reps], axis=0)
@@ -298,7 +320,8 @@ def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=
 						columns=assembled.columns)
 
 
-def estimate_alpha(normalized_readcounts, negative_control_sgrnas, sequence_map, exclude_range=2.0):
+def estimate_alpha(normalized_readcounts, negative_control_sgrnas, sequence_map, exclude_range=2.0,
+	use_line_mean_as_reference=5):
 	'''
 	Estimates the overdispersion parameter alpha in the NB2 model: variance = mean * (1 + alpha * mean)
 	Alpha is estimated using an "auxiliary" OLS model. The true mean of negative controls is assumed to
@@ -316,6 +339,9 @@ def estimate_alpha(normalized_readcounts, negative_control_sgrnas, sequence_map,
 								cell lines for a given pDNA batch deviates from the pDNA abundance by more than `exclude_range` 
 								in log space, it will be excluded in that batch. Batches with fewer than 5 cell lines will not
 								be filtered by this value.
+		use_line_mean_as_reference (`int`): when at least this many lines are present for a pDNA batch, use the average
+								of late time point sequences for that batch as the expected counts instead of pDNA counts.
+								This gets around the problem of pDNA error.
 	Returns:
 		alphas (`pandas.Series`): a per-cell_line estimate of alpha.
 	'''
@@ -348,28 +374,29 @@ to obtain the correctly normalized readcount matrix before using this function."
 	logexpected = logexpected.loc[log_rep_batch_median.index]	
 	logdiff =  log_rep_batch_median - logexpected
 	ndiff = (logdiff.abs() > exclude_range).sum(axis=1)
-	print("Between %i (batch=%r) and %i (batch=%r) negative control sgRNAs were found to be \
+	warn("Between %i (batch=%r) and %i (batch=%r) negative control sgRNAs were found to be \
 systematically over- or under-represented in the screens and excluded." % (
 		ndiff.min(), ndiff.index[ndiff == ndiff.min()], 
 		ndiff.max(), ndiff.index[ndiff == ndiff.max()]
 	))
 
 	mask = ~(logdiff.abs() < exclude_range)
-	if (1-mask).sum(axis=1).min() < 100:
-		raise ValueError("Fewer than 100 negative control sgRNAs remaining in one or more \
-batches, too few to estimate overdispersion.")
-	# if there are less than five lines in a batch, we don't want to exclude negative
-	# controls on the basis of being offset. 
+	if (1-mask).sum(axis=1).min() < 20:
+		raise ValueError("Fewer than 20 negative control sgRNAs remaining in one or more \
+batches, too few to estimate overdispersion. Try passing a specific manual value for \
+ overdispersion, such as 0.04")
+	# if there are less than `use_line_mean_as_reference` lines in a batch, we don't want to 
+	# exclude negative controls on the basis of being offset. 
 	n_lines = sequence_map\
 				.query("cell_line_name != 'pDNA'")\
 				.groupby("pDNA_batch")\
 				.cell_line_name\
 				.nunique()
 
-	too_few = n_lines.loc[lambda x: x < 5].index
+	too_few = n_lines.loc[lambda x: x < use_line_mean_as_reference].index
 	mask.loc[too_few] = False
 	# for batches with enough cell lines, use replicate median as reference instead
-	for batch in n_lines.loc[lambda x: x >= 5].index:
+	for batch in n_lines.loc[lambda x: x >= use_line_mean_as_reference].index:
 		expected.loc[batch] = normalized_readcounts.loc[
 			rep_ids.loc[batch], 
 			negative_control_sgrnas
@@ -389,19 +416,16 @@ batches, too few to estimate overdispersion.")
 def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, gap_cutoff=2,
 				  rpm_normalize=False):
 	'''
-	NaNs readcounts IN PLACE in cases where all of the following are true:
+	NaNs readcounts in cases where all of the following are true:
 		- The logfold change for the guide/replicate pair is greater than `absolute_cutoff`
-		- The difference between the lfc for this pair and the next most positive pair for that gene 
-			and cell line is greater than `gap_cutoff`. 
+		- The difference between the lfc for this pair and the next most positive pair for that gene and cell line is greater than 
+			gap_cutoff. 
 	Readcounts are mutated in place.
 	Parameters:
 		readcounts (`pandas.DataFrame`): readcount matrix with replicates on rows, guides on columns
 		sequence_map (`pandas.DataFrame`): has string columns "sequence_ID", "cell_line_name", and "pDNA_batch"
 		guide_gene_map (`pandas.DataFrame`): has string columns "sequence_ID", "cell_line_name", and "pDNA_batch"
-		absolute_cutoff (`float`): LFCs less positive than this will not be considered outliers
-		gap_cutoff (`float`): See above.
-		rpm_normalize (`bool`): whether to RPM normalize the readcounts before computing LFC.
-			This is not done in place.
+
 	'''
 	
 	check_inputs(readcounts={'default': readcounts}, sequence_map={'default': sequence_map},
@@ -527,25 +551,25 @@ all of them must be provided")
 			**usable_params
 		)
 
-	print("assigning trained parameters")
-	print("\tlibrary effect")
+	model.printer.print("assigning trained parameters")
+	model.printer.print("\tlibrary effect")
 	model.library_effect = library_effect
-	print("\tgene effect")
+	model.printer.print("\tgene effect")
 	model.gene_effect = read_hdf5(os.path.join(directory, "gene_effect.hdf5"))
-	print("\tguide efficacy")
+	model.printer.print("\tguide efficacy")
 	model.guide_efficacy = pd.read_csv(os.path.join(directory, "guide_efficacy.csv"), index_col=0).iloc[:, 0]
-	print("\tcell efficacy")
+	model.printer.print("\tcell efficacy")
 	model.cell_efficacy = pd.read_csv(os.path.join(directory, "cell_line_efficacy.csv"), index_col=0)
-	print("\tcell growth rate")
+	model.printer.print("\tcell growth rate")
 	model.growth_rate = pd.read_csv(os.path.join(directory, "cell_line_growth_rate.csv"), index_col=0)
-	print("\tscreen excess variance")
+	model.printer.print("\tscreen excess variance")
 	model.excess_variance = pd.read_csv(os.path.join(directory, "screen_excess_variance.csv"), index_col=0)
-	print("\tscreen delay")
+	model.printer.print("\tscreen delay")
 	model.screen_delay = pd.read_csv(os.path.join(directory, "screen_delay.csv"), index_col=0).iloc[:,0]
-	print("\tt0 offset")
+	model.printer.print("\tt0 offset")
 	model.t0_offset = pd.read_csv(os.path.join(directory, "t0_offset.csv"), index_col=0)
 
-	print("Complete.\nCost when saved: %f, cost now: %f\nFull cost when saved: %f, full cost now: %f" %(
+	model.printer.print("Complete.\nCost when saved: %f, cost now: %f\nFull cost when saved: %f, full cost now: %f" %(
 		parameters['cost'], model.cost, parameters['full_cost'], model.full_cost
 	))
 	return model
@@ -624,7 +648,7 @@ class Chronos(object):
 				 gene_effect_L1=0.1,
 				 gene_effect_L2=0,
 				 offset_reg=1,
-				 excess_variance=0.02,
+				 excess_variance=None,
 				 guide_efficacy_reg=.01,
 				 library_batch_reg=.1,
 				
@@ -638,7 +662,9 @@ class Chronos(object):
 				 dtype=tf.double,
 				 verify_integrity=True, 
 				 log_dir=None,
-				 to_normalize_readcounts=True
+				 to_normalize_readcounts=True,
+				 use_line_mean_as_reference=5,
+				 print_to="stdout"
 				):
 		'''
 		Parameters:
@@ -695,6 +721,9 @@ class Chronos(object):
 			to_normalize_readcounts (`bool`): If true, the readcounts will be normalized. if negative_control_sgRNAs are provided,
 								Chronos will normalize such that the median log reads of negative controls in each replicate match
 								the median in the pDNA batch. 
+			use_line_mean_as_reference (`int`): passed to `estimate_alpha`
+			print_to (`str` or `None`): where to print ordinary messages from Chronos. Default is `stdout`. Pass a file path to print
+								to the file or `None` to skip these messages.
 
 		Attributes:
 			Attributes beginning wit "v_" are tensorflow variables, and attributes beginning with _ are 
@@ -702,33 +731,34 @@ class Chronos(object):
 			nodes are exposed as properties which return properly indexed Pandas objects. 
 			
 		Properties (type `help(Chronos.<property>) to learn more):
-		    cell_efficacy
-		    cost
-		    cost_presum
-		    days
-		    estimated_fold_change
-		    full_cost
-		    gene_effect
-		    guide_efficacy
-		    growth_rate
-		    efficacy
-		    excess_variance
-		    learning_rate
-		    library_means
-		    library_effect
-		    mask
-		    measured_t0
-		    normalized_readcounts
-		    predicted_readcounts_scaled
-		    predicted_readcounts
-		    screen_delay
-		    t0
-		    t0_core
-		    t0_offset
+			cell_efficacy
+			cost
+			cost_presum
+			days
+			estimated_fold_change
+			full_cost
+			gene_effect
+			guide_efficacy
+			growth_rate
+			efficacy
+			excess_variance
+			learning_rate
+			library_means
+			library_effect
+			mask
+			measured_t0
+			normalized_readcounts
+			predicted_readcounts_scaled
+			predicted_readcounts
+			screen_delay
+			t0
+			t0_core
+			t0_offset
 		'''
 
 
 		###########################    I N I T I A L      C  H  E  C  K  S  ############################
+		self.printer = StdoutRedirector(print_to)
 
 		check_inputs(readcounts=readcounts, sequence_map=sequence_map, guide_gene_map=guide_gene_map)
 		check_negative_control_sgrnas(negative_control_sgrnas, readcounts)
@@ -737,7 +767,7 @@ class Chronos(object):
 
 		sequence_map = self._make_pdna_unique(sequence_map, readcounts)
 		if to_normalize_readcounts:
-			print("normalizing readcounts")
+			self.printer.print("normalizing readcounts")
 			readcounts = {key: normalize_readcounts(val, negative_control_sgrnas.get(key), sequence_map[key])
 						for key, val in readcounts.items()}
 		self.sequence_map = sequence_map
@@ -792,17 +822,19 @@ class Chronos(object):
 
 		##################    A  S  S  I  G  N       C  O  N  S  T  A  N  T  S   #######################
 
-		print('\n\nassigning float constants')
+		self.printer.print('\n\nassigning float constants')
 		self.guide_efficacy_reg = float(guide_efficacy_reg)
 		self.gene_effect_L1 = float(gene_effect_L1)
 		self.gene_effect_L2 = float(gene_effect_L2)
-		self.gene_effect_hierarchical = float(gene_effect_hierarchical)
+		self._private_gene_effect_hierarchical = float(gene_effect_hierarchical)
+		self._gene_effect_hierarchical = tf.compat.v1.placeholder(dtype, shape=())
 		self.growth_rate_reg = float(growth_rate_reg)
 		self.offset_reg = float(offset_reg)
 		self.gene_effect_smoothing = float(gene_effect_smoothing)
 		self.kernel_width = float(kernel_width)
 		self.cell_efficacy_guide_quantile = float(cell_efficacy_guide_quantile)
 		self.library_batch_reg = float(library_batch_reg)
+		self.use_line_mean_as_reference = use_line_mean_as_reference
 
 		if not 0 < self.cell_efficacy_guide_quantile < .5:
 			raise ValueError("cell_efficacy_guide_quantile should be greater than 0 and less than 0.5")
@@ -813,11 +845,13 @@ class Chronos(object):
 		#the alpha parameter of an NB2 model for readcount noise, one value per sequence, dict by library
 		#behavior depends on whether negative_control_sgrnas are supplied for each library.
 		excess_variance = self._estimate_excess_variance(
-			excess_variance, readcounts, negative_control_sgrnas, sequence_map
+			excess_variance, readcounts, negative_control_sgrnas, sequence_map, use_line_mean_as_reference
 		)
 		self._excess_variance = self._get_excess_variance_tf(excess_variance)
 
 		self.median_timepoint_counts = self._summarize_timepoint(sequence_map, np.median)
+
+		self.median_guide_counts = self._get_median_guide_counts(self.unified_guide_map)
 
 		#set up the graph
 		self._initialize_graph(max_learning_rate, dtype)
@@ -840,11 +874,11 @@ class Chronos(object):
 
 		self._pretrained = pretrained
 		self._is_model_loaded = False
-        
+		
 
 		##################    C  R  E  A  T  E       V  A  R  I  A  B  L  E  S   #######################
 
-		print('\n\nBuilding variables')
+		self.printer.print('\n\nBuilding variables')
 
 		(
 				self.v_t0, self._t0_core, 
@@ -871,14 +905,14 @@ class Chronos(object):
 		# _true_residue is this deviation after constraining v_residue to have mean 0. 
 		# _combined_gene_effect is the sum of v_mean_effect and _true_residue. This is the tensor 
 		# accessed by the attribute Chronos.gene_effect.
-		(self.v_mean_effect, self.v_residue, self._residue, self._true_residue, self._combined_gene_effect,
-			self.v_library_effect, self._library_effect
-			) = self._get_tf_gene_effect(dtype)
+		(self.v_mean_effect, self.v_residue, self._residue, self._true_residue, 
+			self._combined_gene_effect, self.v_library_effect, self._library_effect
+		) = self._get_tf_gene_effect(dtype)
 
 
 		#############################    C  O  R  E      M  O  D  E  L    ##############################
 
-		print("\n\nConnecting graph nodes in model")
+		self.printer.print("\n\nConnecting graph nodes in model")
 		# _effective_days: _days - _screen_delay clipped to be semipositive. Library dict per cell line
 		self._effective_days = self._get_effect_days(self._screen_delay, self._days)
 		#_gene_effect_growth: 
@@ -896,10 +930,13 @@ class Chronos(object):
 		# this is normalized to have sum 1, then multiplied by _pdna_scale to get the absolute expected reads.
 		self._predicted_readcounts_unscaled, self._predicted_readcounts = self._get_abundance_estimates(self._t0, self._change)
 
+		init_op = tf.compat.v1.global_variables_initializer()
+		self.printer.print('initializing precost variables')
+		self.sess.run(init_op)
 
 		#####################################    C  O  S  T    #########################################
 
-		print("\n\nBuilding all costs")
+		self.printer.print("\n\nBuilding all costs")
 
 		self._total_guide_reg_cost = self._get_guide_regularization_alt(self._guide_efficacy, dtype)
 
@@ -907,8 +944,10 @@ class Chronos(object):
 
 		self._t0_cost = self._get_t0_regularization(self._t0_offset)
 			
-		self._cost_presum, self._cost, self._scale = self._get_nb2_cost(self._excess_variance, self._predicted_readcounts, 
-			self._normalized_readcounts, self._mask, dtype)
+		self._cost_presum, self._cost_constant, self._cost, self._scale = self._get_nb2_cost(
+			self._excess_variance, self._predicted_readcounts, 
+			self._normalized_readcounts, self._mask, dtype
+		)
 
 		self._library_means, self._library_batch_cost = self._get_library_batch_reg(
 			self._true_residue, self.library_batch_reg, dtype
@@ -921,7 +960,7 @@ class Chronos(object):
 
 		#########################    F  I  N  A  L  I  Z  I  N  G    ###################################
 
-		print('\nCreating optimizer')       
+		self.printer.print('\nCreating optimizer')       
 		self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=self._learning_rate, name="Adam")
 
 
@@ -933,6 +972,10 @@ class Chronos(object):
 				self.v_growth_rate,
 				self.v_library_effect
 				]
+		if self.median_guide_counts <= 2:
+			self.printer.print("Two or fewer guides for most genes, guide efficacy will not be trained")
+			self.default_var_list.remove(self.v_guide_efficacy)
+
 		self._step = self.optimizer.minimize(self._full_cost, var_list=self.default_var_list)
 		self._ge_only_step = self.optimizer.minimize(self._full_cost, var_list=[self.v_mean_effect, self.v_residue])
 		self._loaded_model_step = self.optimizer.minimize(self._full_cost, var_list=[self.v_residue, 
@@ -940,7 +983,7 @@ class Chronos(object):
 		self._merged = tf.compat.v1.summary.merge_all()
 
 		if log_dir is not None:
-			print("\tcreating log at %s" %log_dir)
+			self.printer.print("\tcreating log at %s" %log_dir)
 			if os.path.isdir(log_dir):
 				shutil.rmtree(log_dir)
 			os.mkdir(log_dir)
@@ -948,7 +991,7 @@ class Chronos(object):
 			self.writer = tf.compat.v1.summary.FileWriter(log_dir, self.sess.graph)
 		
 		init_op = tf.compat.v1.global_variables_initializer()
-		print('initializing variables')
+		self.printer.print('initializing rest of graph')
 		self.sess.run(init_op)
 
 		if scale_cost:
@@ -956,20 +999,20 @@ class Chronos(object):
 			self.run_dict.update({self._scale: scale_cost/denom})
 
 		if smart_init:
-			print("estimating initial screen efficacy and gene effect")
+			self.printer.print("estimating initial screen efficacy and gene effect")
 			self.smart_initialize(readcounts, sequence_map, guide_gene_map, cell_efficacy_guide_quantile, negative_control_sgrnas,
 				initial_screen_delay)
 
 		if verify_integrity:
-			print("\tverifying graph integrity")
+			self.printer.print("\tverifying graph integrity")
 			self.nan_check()
 
 		self.epoch = 0
 
 		if self._pretrained:
-			print('waiting for user to load model')
+			self.printer.print('waiting for user to load model')
 		else:
-			print('ready to train')
+			self.printer.print('ready to train')
 
 
 
@@ -1008,9 +1051,14 @@ class Chronos(object):
 
 
 	def _check_excess_variance(self, excess_variance, readcounts, sequence_map):
+		if excess_variance is None:
+			return {}
 		if not isinstance(excess_variance, dict):
 			try:
-				excess_variance = float(excess_variance) 
+				excess_variance = float(excess_variance)
+				return {key: pd.Series(excess_variance, 
+					index=val.query("cell_line_name != 'pDNA'").sequence_ID)
+				for key, val in sequence_map.items()} 
 			except ValueError:
 				raise ValueError("if provided, excess_variance must be a dict of pd.Series per library or a float")
 		else:
@@ -1058,7 +1106,7 @@ class Chronos(object):
 
 
 	def _get_column_attributes(self, readcounts, guide_gene_map):
-		print('\n\nFinding all unique guides and genes')
+		self.printer.print('\n\nFinding all unique guides and genes')
 		#guarantees the same sequence of guides and genes within each library
 		guides = {key: val.columns for key, val in readcounts.items()}
 		genes = {key: val.set_index('sgrna').loc[guides[key], 'gene'] for key, val in guide_gene_map.items()}
@@ -1066,11 +1114,11 @@ class Chronos(object):
 		all_genes = sorted(set.union(*[set(v.values) for v in genes.values()]))
 		intersecting_genes = sorted(set.intersection(*[set(v.values) for v in genes.values()]))
 		for key in self.keys:
-			print("found %i unique guides and %i unique genes in %s" %(
+			self.printer.print("found %i unique guides and %i unique genes in %s" %(
 				len(set(guides[key])), len(set(genes[key])), key
 				))
-		print("found %i unique guides and %i unique genes overall" %(len(all_guides), len(all_genes)))
-		print('\nfinding guide-gene mapping indices')
+		self.printer.print("found %i unique guides and %i unique genes overall" %(len(all_guides), len(all_genes)))
+		self.printer.print('\nfinding guide-gene mapping indices')
 		#in guide_map, gather_index_inner gives the index of the targeted gene in all_genes
 		#gather_index_outer gives the index of the sgrna in all_guides
 		#concretely, for any tensor with guides as columns, the ith column is the sgrna 
@@ -1093,14 +1141,14 @@ class Chronos(object):
 		if len(duplicates):
 			raise ValueError("Inconsistent gene annotations seen for the same sgrna in different libraries.\n%r" % 
 				unified[unified.sgrna.isin(duplicates)].sort_values("sgrna"))
-		unified_guide_map = Chronos.make_map(unified.set_index('sgrna').loc[all_guides, 'gene'], 
-			all_guides, all_genes)
+		unified_guide_map = pd.DataFrame(Chronos.make_map(unified.set_index('sgrna').loc[all_guides, 'gene'], 
+			all_guides, all_genes))
 
 		return genes, all_guides, all_genes, intersecting_genes, guide_map, unified_guide_map, column_map
 
 
 	def _get_row_attributes(self, readcounts, sequence_map):
-		print('\nfinding all unique sequenced replicates, cell lines, and pDNA batches')
+		self.printer.print('\nfinding all unique sequenced replicates, cell lines, and pDNA batches')
 		#guarantees the same sequence of sequence_IDs and cell lines within each library.
 		sequences = {key: val[val.cell_line_name != 'pDNA'].sequence_ID for key, val in sequence_map.items()}
 		pDNA_batches = {key: list(val[val.cell_line_name != 'pDNA'].pDNA_batch.values)
@@ -1116,12 +1164,12 @@ class Chronos(object):
 		assert len(all_sequences) == sum([len(val) for val in sequences.values()]
 			), "sequence IDs must be unique among all datasets"
 		for key in self.keys:
-			print("found %i unique sequences (excluding pDNA) and %i unique cell lines in %s" %(
+			self.printer.print("found %i unique sequences (excluding pDNA) and %i unique cell lines in %s" %(
 				len(set(sequences[key])), len(set(cells[key])), key
 				))
-		print("found %i unique replicates and %i unique cell lines overall" %(len(all_sequences), len(all_cells)))
+		self.printer.print("found %i unique replicates and %i unique cell lines overall" %(len(all_sequences), len(all_cells)))
 
-		print('\nfinding replicate-cell line mappings indices')
+		self.printer.print('\nfinding replicate-cell line mappings indices')
 		# in replicate_map, gather_index_inner gives the index of the replicate's cell line in all_cells
 		# gather_index_outer gives the index of the replicate in all_sequences
 		replicate_map = {key: 
@@ -1131,7 +1179,7 @@ class Chronos(object):
 		index_map = {key: np.array(all_sequences)[replicate_map[key]['gather_ind_outer']]
 								for key in self.keys}
 
-		print('\nfinding replicate-pDNA mappings indices')
+		self.printer.print('\nfinding replicate-pDNA mappings indices')
 		batch_map = {key: 
 				Chronos.make_map(sequence_map[key][['sequence_ID', 'pDNA_batch']].set_index('sequence_ID').iloc[:, 0],
 				 all_sequences, pDNA_unique[key], self.np_dtype)
@@ -1143,23 +1191,25 @@ class Chronos(object):
 ##################    A  S  S  I  G  N       C  O  N  S  T  A  N  T  S   #######################
 
 
-	def _estimate_excess_variance(self, excess_variance, readcounts, negative_control_sgrnas, sequence_map):
-		print('Estimating or aligning variances')
+	def _estimate_excess_variance(self, excess_variance, readcounts, negative_control_sgrnas, sequence_map,
+			use_line_mean_as_reference):
+		self.printer.print('Estimating or aligning variances')
 		if not isinstance(excess_variance, dict):
 			prior_variance = excess_variance
 			excess_variance = {}
 		for key in self.keys:
 			if not (negative_control_sgrnas.get(key) is None) and not key in excess_variance:
-				print('\tEstimating excess variance (alpha) for %s' % key)
+				self.printer.print('\tEstimating excess variance (alpha) for %s' % key)
 				excess_variance[key] = estimate_alpha(
-						readcounts[key], negative_control_sgrnas[key], sequence_map[key]
+						readcounts[key], negative_control_sgrnas[key], sequence_map[key],
+						use_line_mean_as_reference=use_line_mean_as_reference
 					)[self.index_map[key]]
 			elif not key in excess_variance:
 				excess_variance[key] = pd.Series(prior_variance, index=self.index_map[key])
 		return excess_variance
 
 	def _get_excess_variance_tf(self, excess_variance):
-		print("Creating excess variance tensors")
+		self.printer.print("Creating excess variance tensors")
 		_excess_variance = {}
 		with tf.compat.v1.name_scope("excess_variance"):
 			for key in self.keys:
@@ -1172,7 +1222,7 @@ class Chronos(object):
 					raise IndexError("difference between index values for excess_variance and replicates found in %s" % key)
 				except TypeError:
 					_excess_variance[key] = tf.Variable(excess_variance * np.ones(shape=(len(self.index_map[key]), 1)))
-				print("\tCreated excess variance tensor for %s with shape %r" % (key, _excess_variance[key].get_shape().as_list()))
+				self.printer.print("\tCreated excess variance tensor for %s with shape %r" % (key, _excess_variance[key].get_shape().as_list()))
 		return _excess_variance
 
 
@@ -1183,19 +1233,25 @@ class Chronos(object):
 		return out
 
 
+	def _get_median_guide_counts(self, unified_guide_map):
+		return unified_guide_map.groupby("labels_inner").labels_outer.nunique().median()
+
 
 	def _initialize_graph(self, max_learning_rate, dtype):
-		print('initializing graph')
+		self.printer.print('initializing graph')
 		self.sess = tf.compat.v1.Session()
 		self._learning_rate = tf.compat.v1.placeholder(shape=tuple(), dtype=dtype)
-		self.run_dict = {self._learning_rate: max_learning_rate}
+		self.run_dict = {
+			self._learning_rate: max_learning_rate, 
+			self._gene_effect_hierarchical: self._private_gene_effect_hierarchical
+		}
 		self.max_learning_rate = max_learning_rate
 		self.persistent_handles = set([])
 
 
 	def _get_gene_effect_mask(self, readcounts, sequence_map, guide_gene_map, dtype):
 		# excludes genes in a cell line with reads from only one library
-		print('\nbuilding gene effect mask')
+		self.printer.print('\nbuilding gene effect mask')
 
 		masks = {
 			key: readcounts[key]\
@@ -1233,11 +1289,11 @@ class Chronos(object):
 
 
 	def _get_days(self, sequence_map, dtype):   
-		print('\nbuilding doubling vectors')
+		self.printer.print('\nbuilding doubling vectors')
 		with tf.compat.v1.name_scope("days"):
 			_days = {key: 
 				tf.constant(
-					  	  Chronos.default_timepoint_scale 
+						  Chronos.default_timepoint_scale 
 						* val.set_index('sequence_ID').loc[self.index_map[key]].days.astype(self.np_dtype).values, 
 					dtype=dtype, 
 					shape=(len(self.index_map[key]), 1), 
@@ -1245,13 +1301,13 @@ class Chronos(object):
 				)
 			for key, val in sequence_map.items()}
 		for key in self.keys:
-			print("made days vector of shape %r for %s" %(
+			self.printer.print("made days vector of shape %r for %s" %(
 				_days[key].get_shape().as_list(), key))
 		return _days
 
 
 	def _get_late_tf_timepoints(self, readcounts, dtype):
-		print("\nbuilding late observed timepoints")
+		self.printer.print("\nbuilding late observed timepoints")
 		_normalized_readcounts = {}
 		_mask = {}
 		for key in self.keys:
@@ -1261,13 +1317,13 @@ class Chronos(object):
 			_mask[key] = tf.constant(mask, dtype=tf.bool, name='NaN_mask_%s' % key)
 			normalized_readcounts_np[~mask] = 0
 			_normalized_readcounts[key] = self.get_persistent_input(dtype, normalized_readcounts_np, name='normalized_readcounts_%s' % key)
-			print("\tbuilt normalized timepoints for %s with shape %r (replicates X guides)" %(
+			self.printer.print("\tbuilt normalized timepoints for %s with shape %r (replicates X guides)" %(
 				key, normalized_readcounts_np.shape))
 		return _normalized_readcounts, _mask
 
 
 	def _get_tf_measured_t0(self, readcounts, sequence_map, dtype):
-		print('\nbuilding t0 reads')
+		self.printer.print('\nbuilding t0 reads')
 		_measured_t0 = {}
 		_pdna_scale = {}
 		with tf.compat.v1.name_scope("measured_t0"):
@@ -1300,7 +1356,7 @@ class Chronos(object):
 ##################    C  R  E  A  T  E       V  A  R  I  A  B  L  E  S   #######################
 
 	def _get_t0_tf_variables(self, _measured_t0, dtype):
-		print("\nbuilding t0 reads estimate")
+		self.printer.print("\nbuilding t0 reads estimate")
 
 		v_t0 = {}
 		_t0_core = {}
@@ -1364,7 +1420,7 @@ class Chronos(object):
 						tf.transpose(a=_t0_offset[key])
 						# for every guide, subtract the mean offset for all guides targetiing the same gene
 					  - tf.gather(
-					  		_combined_t0_offset, 
+							_combined_t0_offset, 
 							self.guide_map[key]['gather_ind_inner'], 
 							axis=1
 						)
@@ -1380,7 +1436,7 @@ class Chronos(object):
 						)
 
 
-				print("made t0 batch with shape %r for %s" %(
+				self.printer.print("made t0 batch with shape %r for %s" %(
 					t0_normed.shape, key))
 
 		return v_t0, _t0_core, _t0, _t0_offset, \
@@ -1389,11 +1445,11 @@ class Chronos(object):
 
 
 	def _get_tf_guide_efficacy(self, dtype):        
-		print("building guide efficacy")
+		self.printer.print("building guide efficacy")
 		with tf.compat.v1.name_scope("guide_efficacy"):
 			v_guide_efficacy = tf.Variable(
 				#last guide is dummy
-				np.random.normal(size=(1, self.nguides+1), scale=.01).astype(self.np_dtype),
+				np.random.normal(size=(1, self.nguides+1), scale=.001).astype(self.np_dtype),
 				name='base', dtype=dtype)
 			_guide_efficacy_mask_input = tf.compat.v1.placeholder(shape=(1, self.nguides+1), dtype=tf.bool, 
 				name="mask_input")
@@ -1401,12 +1457,12 @@ class Chronos(object):
 				name="masked")
 			_guide_efficacy = tf.exp(-tf.abs(_guide_efficacy_masked), name='guide_efficacy')
 			tf.compat.v1.summary.histogram("guide_efficacy", _guide_efficacy)
-			print("built guide efficacy: shape %r" %_guide_efficacy.get_shape().as_list())
+			self.printer.print("built guide efficacy: shape %r" %_guide_efficacy.get_shape().as_list())
 		return v_guide_efficacy, _guide_efficacy_mask_input, _guide_efficacy
 
 
 	def _get_tf_growth_rate(self, dtype):
-		print("building growth rate")
+		self.printer.print("building growth rate")
 		with tf.compat.v1.name_scope("growth_rate"):
 			v_growth_rate = { key: tf.Variable(
 					np.random.normal(size=(self.nlines, 1), scale=.01, loc=1).astype(self.np_dtype),
@@ -1424,13 +1480,13 @@ class Chronos(object):
 			_growth_rate = {key: tf.divide(val, tf.reduce_mean(input_tensor=tf.boolean_mask(tensor=val, mask=_line_presence_boolean[key])), 
 									name="growth_rate_%s" % key)
 								for key, val in _growth_rate_square.items()}
-		print("built growth rate: shape %r" % {key: val.get_shape().as_list() 
+		self.printer.print("built growth rate: shape %r" % {key: val.get_shape().as_list() 
 			for key, val in _growth_rate.items()})
 		return v_growth_rate, _growth_rate, _line_presence_boolean
 
 
 	def _get_tf_cell_efficacy(self, dtype):
-		print("\nbuilding cell line efficacy")
+		self.printer.print("\nbuilding cell line efficacy")
 		with tf.compat.v1.name_scope("cell_efficacy"):
 			v_cell_efficacy = { key: tf.Variable(
 					np.random.normal(size=(self.nlines, 1), scale=.01, loc=0).astype(self.np_dtype),
@@ -1439,24 +1495,24 @@ class Chronos(object):
 			_cell_efficacy = {key: tf.exp(-tf.abs(v_cell_efficacy[key]),
 							  name='%s' % key)
 					for key in self.keys}
-		print("built cell line efficacy: shapes %r" % {key: v.get_shape().as_list() for key, v in _cell_efficacy.items()})
+		self.printer.print("built cell line efficacy: shapes %r" % {key: v.get_shape().as_list() for key, v in _cell_efficacy.items()})
 		return v_cell_efficacy, _cell_efficacy
 
 
 	def _get_tf_screen_delay(self, initial_screen_delay, dtype):
-		print("building screen delay")
+		self.printer.print("building screen delay")
 		with tf.compat.v1.name_scope("screen_delay"):
 			v_screen_delay = tf.Variable(
 							np.sqrt(Chronos.default_timepoint_scale * initial_screen_delay) * np.ones((1, self.ngenes), dtype=self.np_dtype),
-					 		dtype=dtype, name="base")
+							dtype=dtype, name="base")
 			_screen_delay = tf.square(v_screen_delay)
 		tf.compat.v1.summary.histogram("screen_delay", _screen_delay)
-		print("built screen delay")
+		self.printer.print("built screen delay")
 		return v_screen_delay, _screen_delay
 
 
 	def _get_tf_gene_effect(self, dtype):
-		print("building gene effect")
+		self.printer.print("building gene effect")
 
 		with tf.compat.v1.name_scope("GE"):
 			gene_effect_est = np.random.uniform(-.0001, .0001, size=(self.nlines, self.ngenes)).astype(self.np_dtype)
@@ -1476,7 +1532,7 @@ class Chronos(object):
 						(tf.reduce_mean(input_tensor=_residue, axis=0, name="sum_over_guides"))[tf.newaxis, :],
 						name="mean_centered"
 						)
-                  
+				  
 			_combined_gene_effect = tf.add(v_mean_effect, _true_residue, name="GE")
 
 			with tf.compat.v1.name_scope("library_effect"):
@@ -1510,25 +1566,29 @@ class Chronos(object):
 				_library_effect = {key: v - _library_effect_mean for key, v in _library_effect_indicated.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
-		print("built core gene effect: %i cell lines by %i genes" %tuple(_combined_gene_effect.get_shape().as_list()))
-		return v_mean_effect, v_residue, _residue, _true_residue, _combined_gene_effect, v_library_effect, _library_effect
+
+		self.printer.print("built core gene effect: %i cell lines by %i genes" %tuple(_combined_gene_effect.get_shape().as_list()))
+
+
+		return v_mean_effect, v_residue, _residue, _true_residue, _combined_gene_effect, \
+				v_library_effect, _library_effect
 
 
 #############################    C  O  R  E      M  O  D  E  L    ##############################
 
 	def _get_effect_days(self, _screen_delay, _days):
-		print("\nbuilding effective days")
+		self.printer.print("\nbuilding effective days")
 		with tf.compat.v1.name_scope("effective_days"):
 			_effective_days = {key: 
 				tf.clip_by_value(val - _screen_delay, 0, 100, name=key)
 			for key, val in _days.items()}
 
-		print("built effective days, shapes %r" % {key: val.get_shape().as_list() for key, val in _effective_days.items()})
+		self.printer.print("built effective days, shapes %r" % {key: val.get_shape().as_list() for key, val in _effective_days.items()})
 		return _effective_days
 
 
 	def _get_gene_effect_growth(self, _combined_gene_effect, _growth_rate, _library_effect):
-		print('\nbuilding gene effect growth graph nodes')
+		self.printer.print('\nbuilding gene effect growth graph nodes')
 		with tf.compat.v1.name_scope('GE_growth'):
 
 			_gene_effect_growth = {key: 
@@ -1538,13 +1598,13 @@ class Chronos(object):
 					name=key) 
 			for key in self.keys}
 
-		print("built gene effect growth graph nodes, shapes %r" % {key: val.get_shape().as_list() 
+		self.printer.print("built gene effect growth graph nodes, shapes %r" % {key: val.get_shape().as_list() 
 			for key, val in _gene_effect_growth.items()})
 		return _gene_effect_growth
 
 
 	def _get_combined_efficacy(self, _cell_efficacy, _guide_efficacy):
-		print('\nbuilding combined efficacy')
+		self.printer.print('\nbuilding combined efficacy')
 		with tf.compat.v1.name_scope('efficacy'):
 			_efficacy = {key: 
 					tf.matmul(_cell_efficacy[key], tf.gather(_guide_efficacy, self.guide_map[key]['gather_ind_outer'], axis=1, name='guide_%s' % key),
@@ -1558,13 +1618,13 @@ class Chronos(object):
 						)
 				for key in self.keys
 			}
-		print("built combined efficacy, shape %r" % {key: v.get_shape().as_list()for key, v in _efficacy.items()})
-		print("built expanded combined efficacy, shapes %r" % {key: val.get_shape().as_list() for key, val in _selected_efficacies.items()})
+		self.printer.print("built combined efficacy, shape %r" % {key: v.get_shape().as_list()for key, v in _efficacy.items()})
+		self.printer.print("built expanded combined efficacy, shapes %r" % {key: val.get_shape().as_list() for key, val in _selected_efficacies.items()})
 		return _efficacy, _selected_efficacies
 
 
 	def _get_growth_and_fold_change(self, _gene_effect_growth, _effective_days, _selected_efficacies):
-		print("\nbuilding growth estimates of edited cells and overall estimates of fold change in guide abundance")
+		self.printer.print("\nbuilding growth estimates of edited cells and overall estimates of fold change in guide abundance")
 		_change = {}
 		_growth = {}
 		with tf.compat.v1.name_scope("FC"):
@@ -1592,18 +1652,18 @@ class Chronos(object):
 					),
 					name="FC_%s" % key  
 				)
-		print("built growth and change")
+		self.printer.print("built growth and change")
 		return _growth, _change
 
 
 	def _get_abundance_estimates(self, _t0, _change):
-		print("\nbuilding unnormalized estimates of final abundance")
+		self.printer.print("\nbuilding unnormalized estimates of final abundance")
 		_predicted_readcounts_unscaled = {key: tf.multiply(_t0[key], _change[key], name="out_%s" % key)
 				 for key in self.keys}
 		
-		print("built unnormalized abundance")
+		self.printer.print("built unnormalized abundance")
 
-		print("\nbuilding normalized estimates of final abundance")
+		self.printer.print("\nbuilding normalized estimates of final abundance")
 		with tf.compat.v1.name_scope('out_norm'):
 			_predicted_readcounts = {key: 
 					self._pdna_scale[key]\
@@ -1611,7 +1671,7 @@ class Chronos(object):
 						name=key
 						)
 							for key, val in _predicted_readcounts_unscaled.items()}
-		print("built normalized abundance")
+		self.printer.print("built normalized abundance")
 		return _predicted_readcounts_unscaled, _predicted_readcounts
 
 
@@ -1619,7 +1679,7 @@ class Chronos(object):
 
 
 	def _get_guide_regularization_alt(self, _guide_efficacy, dtype):
-		print('\nassembling guide efficacy regularization')
+		self.printer.print('\nassembling guide efficacy regularization')
 		with tf.compat.v1.name_scope("guide_efficacy_reg"):
 			_guide_reg_cost = tf.reduce_mean(
 						input_tensor= 1 - _guide_efficacy,
@@ -1654,7 +1714,7 @@ class Chronos(object):
 
 
 	def _get_smoothed_ge_regularization(self, v_mean_effect, _true_residue, kernel_width, dtype):
-		print("building smoothed regularization")
+		self.printer.print("building smoothed regularization")
 		kernel_size = int(6 * kernel_width)
 		kernel_size = kernel_size + kernel_size % 2 + 1 #guarantees odd width
 		kernel = np.exp( -( np.arange(kernel_size, dtype=self.np_dtype) - kernel_size//2 )**2/ (2*kernel_width**2) )
@@ -1670,7 +1730,7 @@ class Chronos(object):
 
 
 	def _get_t0_regularization(self, _t0_offset):
-		print("\nbuilding t0 reads regularization/cost")
+		self.printer.print("\nbuilding t0 reads regularization/cost")
 		with tf.compat.v1.name_scope("t0_reg"):
 			_t0_cost = {key:
 				tf.reduce_mean( input_tensor=tf.square(_t0_offset[key]), 
@@ -1681,41 +1741,71 @@ class Chronos(object):
 
 
 	def _get_nb2_cost(self, _excess_variance, _predicted_readcounts, _normalized_readcounts, _mask, dtype):
-		print('\nbuilding NB2 cost')
+		self.printer.print('\nbuilding NB2 cost')
 		
 		with tf.compat.v1.name_scope('cost'):
 			# the NB2 cost: (yi + 1/alpha) * ln(1 + alpha mu_i) - yi ln(alpha mu_i)
 			# modified with constants and -mu_i - which makes it become the multinomial cost in the limit alpha -> 0
-			_cost_presum = {key: 
-									(
+			_cost_presum = {key:
+				(
 										((_normalized_readcounts[key]+1e-6) + 1./_excess_variance[key]) * tf.math.log(
-											(1 + _excess_variance[key] * (_predicted_readcounts[key] + 1e-6)) /
-											(1 + _excess_variance[key] * (_normalized_readcounts[key] + 1e-6))
-									) +
+											1 + _excess_variance[key] * (_predicted_readcounts[key] + 1e-6)
+									) -
 										(_normalized_readcounts[key]+1e-6) * tf.math.log(
-											(_normalized_readcounts[key] + 1e-6) / (_predicted_readcounts[key] + 1e-6) 
+											(_excess_variance[key] * _predicted_readcounts[key] + 1e-6)
 										)
 									)
 								for key in self.keys}
 
+			readcounts = self.normalized_readcounts
+			ev = self.excess_variance
+			ev = {key: ev[key].loc[readcounts[key].index].values.reshape((-1, 1))
+				for key in self.keys
+			}
+			_cost_constant = {key: tf.constant(np.nansum(
+									
+										((readcounts[key].values+1e-6) + 1./ev[key])\
+										 * np.log(
+											(1 + ev[key] * (readcounts[key].values + 1e-6))
+									) -
+										(readcounts[key].values+1e-6) * np.log(
+											ev[key]*readcounts[key].values + 1e-6 
+										)
+									))
+									 for key in self.keys}
+
 			_scale = tf.compat.v1.placeholder(dtype=dtype, shape=(), name='scale')
-			_cost =  _scale/len(self.keys) * tf.add_n([tf.reduce_sum(input_tensor=tf.boolean_mask(tensor=v, mask=_mask[key]))
+			_cost =  _scale/len(self.keys) * (
+				tf.add_n([tf.reduce_sum(input_tensor=tf.boolean_mask(tensor=v, mask=_mask[key]))
 													 for key, v in _cost_presum.items()]
 						)
+				- tf.add_n(_cost_constant.values())
+			)
 
 			tf.compat.v1.summary.scalar("unregularized_cost", _cost)
-			return _cost_presum, _cost, _scale
+			return _cost_presum, _cost_constant, _cost, _scale
 
 
 	def _get_full_cost(self, dtype):
-		print("building other regularizations")
+		self.printer.print("building other regularizations")
 		with tf.compat.v1.name_scope('full_cost'):
-			self._L1_penalty = self.gene_effect_L1 * tf.square(tf.reduce_sum(input_tensor=self._combined_gene_effect)/self.mask_count,
-				name="L1_penalty") 
+
+			self._L1_penalty = self.gene_effect_L1 * tf.reduce_sum(
+				input_tensor=tf.abs(
+					tf.reduce_sum(
+						input_tensor=self._combined_gene_effect*self._gene_effect_mask, 
+						axis=1
+					)
+				) / self.mask_count,
+				name="L1_penalty"
+			) 
+
 			self._L2_penalty = self.gene_effect_L2 * tf.reduce_sum(input_tensor=tf.square(self._combined_gene_effect),
 				name="L2_penalty")/self.mask_count
-			self._hier_penalty = self.gene_effect_hierarchical * tf.reduce_sum(input_tensor=tf.square(self._true_residue),
+
+			self._hier_penalty = self._gene_effect_hierarchical * tf.reduce_sum(input_tensor=tf.square(self._true_residue),
 				name="hier_penalty")/self.mask_count
+
 			self._growth_reg_cost = -self.growth_rate_reg * 1.0/len(self.keys) * tf.add_n([
 							tf.reduce_mean( input_tensor=tf.math.log(tf.boolean_mask(tensor=v, mask=self._line_presence_boolean[key])) )
 							for key, v in self._growth_rate.items()
@@ -1753,7 +1843,7 @@ class Chronos(object):
 		cell_eff_est = {}
 		gene_effect_est = {}
 		for key in self.keys:
-			print('\t', key)
+			self.printer.print('\t', key)
 			sm = sequence_map[key]
 			last_reps = extract_last_reps(sm)
 			fc = calculate_fold_change(readcounts[key], sm, rpm_normalize=False)
@@ -1791,7 +1881,7 @@ class Chronos(object):
 		)
 
 
-	def cell_efficacy_estimate(self, fold_change, sequence_map, last_reps, key, cell_efficacy_guide_quantile=.01):
+	def cell_efficacy_estimate(self, fold_change, sequence_map, last_reps, cell_efficacy_guide_quantile=.01):
 		'''
 		Estimate the maximum depletion possible in cell lines as the lowest X percentile guide fold-change in
 		the last timepoint measured. Multiple replicates for a cell line at the same last timepoint are median-collapsed
@@ -1802,12 +1892,12 @@ class Chronos(object):
 		#this breaks when medians.min() == medians.quantile(q); e.g. q% of guides are at 0 median fc
 		#depleting_guides = medians.loc[lambda x: x < medians.quantile(cell_efficacy_guide_quantile)].index
 		depleting_guides = medians.loc[lambda x: x <= medians.quantile(cell_efficacy_guide_quantile)].index
-        #####
+		#####
 		# if medians.min() == medians.quantile(cell_efficacy_guide_quantile):
 		# 	depleting_guides = medians.loc[lambda x: x <= medians.quantile(cell_efficacy_guide_quantile)].index # keep
 		# else:
 		# 	depleting_guides = medians.loc[lambda x: x < medians.quantile(cell_efficacy_guide_quantile)].index   
-        #####
+		#####
 		cell_efficacy = 1 - fc[depleting_guides].median(axis=1)
 		if (cell_efficacy <=0 ).any() or (cell_efficacy > 1).any() or cell_efficacy.isnull().any():
 			raise RuntimeError("estimated efficacy outside bounds. \n%r\n%r" % (cell_efficacy.sort_values(), fc))
@@ -1817,7 +1907,7 @@ class Chronos(object):
 
 	def nan_check(self):
 		#labeled data
-		print('verifying user inputs')
+		self.printer.print('verifying user inputs')
 		for key in self.keys:
 			if pd.isnull(self.sess.run(self._days[key], self.run_dict)).sum().sum() > 0:
 				assert False, "nulls found in self._days[%s]" %key
@@ -1829,7 +1919,7 @@ class Chronos(object):
 				assert False, "negative values found in self._excess_variance[%s]" %key
 
 		#variables
-		print('verifying variables')
+		self.printer.print('verifying variables')
 		if pd.isnull(self.sess.run(self._combined_gene_effect, self.run_dict)).sum().sum() > 0:
 			assert False, "nulls found in self._combined_gene_effect"
 		if pd.isnull(self.sess.run(self.v_guide_efficacy, self.run_dict)).sum().sum() > 0:
@@ -1838,24 +1928,24 @@ class Chronos(object):
 			assert False, "nulls found in self._guide_efficacy"
 
 		#calculated terms
-		print('verifying calculated terms')
+		self.printer.print('verifying calculated terms')
 		for key in self.keys:
 			if pd.isnull(self.sess.run(self.v_cell_efficacy[key], self.run_dict)).sum().sum() > 0:
 				assert False, "nulls found in self.v_cell_efficacy[%r]" % key
 			if pd.isnull(self.sess.run(self._efficacy[key], self.run_dict)).sum().sum() > 0:
 				assert False, "nulls found in self._efficacy[%r]" % key
-			print('\t' + key + ' _gene_effect')
+			self.printer.print('\t' + key + ' _gene_effect')
 			if pd.isnull(self.sess.run(self._gene_effect_growth[key], self.run_dict)).sum().sum() > 0:
 				assert False, "nulls found in self._gene_effect_growth[%s]" %key
-			print('\t' + key + ' _selected_efficacies')
+			self.printer.print('\t' + key + ' _selected_efficacies')
 			if pd.isnull(self.sess.run(self._selected_efficacies[key], self.run_dict)).sum().sum() > 0:
 				assert False, "nulls found in self._selected_efficacies[%s]" %key
-			print('\t' + key + '_predicted_readcounts_unscaled')
+			self.printer.print('\t' + key + '_predicted_readcounts_unscaled')
 			if pd.isnull(self.sess.run(self._predicted_readcounts_unscaled[key], self.run_dict)).sum().sum() > 0:
 				assert False, "nulls found in self._predicted_readcounts_unscaled[%s]" %key
 			if (self.sess.run(self._predicted_readcounts_unscaled[key], self.run_dict) < 0).sum().sum() > 0:
 				assert False, "negatives found in self._predicted_readcounts_unscaled[%s]" %key
-			print('\t' + key + ' _predicted_readcounts')
+			self.printer.print('\t' + key + ' _predicted_readcounts')
 			df = self.sess.run(self._predicted_readcounts[key], self.run_dict)
 			if np.sum(pd.isnull(df).sum()) > 0:
 				assert False, "%i out of %i possible nulls found in self._predicted_readcounts[%s]" % (
@@ -1863,7 +1953,7 @@ class Chronos(object):
 					)
 			if np.sum((df < 0).sum()) > 0:
 				assert False, "negative values found in predicted_readcounts[%s]" % key
-			print('\t' + key + ' _normalized_readcounts')
+			self.printer.print('\t' + key + ' _normalized_readcounts')
 			if np.sum(pd.isnull(self.sess.run(self._normalized_readcounts[key], self.run_dict)).sum()) > 0:
 				assert False, "nulls found in self._normalized_readcounts[%s]" %key
 			min_normalized_readcounts = self.sess.run(self._normalized_readcounts[key], self.run_dict).min().min()
@@ -1886,16 +1976,16 @@ class Chronos(object):
 				print(self.sess.run(
 					(
 							self._normalized_readcounts[key]+1e-6) 
-					 	* tf.math.log(self._excess_variance_expanded[key] 
-					 	* (self._normalized_readcounts[key] + 1e-6) 
+						* tf.math.log(self._excess_variance_expanded[key] 
+						* (self._normalized_readcounts[key] + 1e-6) 
 					 ), 
-					 	self.run_dict)
+						self.run_dict)
 				)
 				raise ValueError("%i nulls found in self._cost_presum[%s]" % (pd.isnull(df).sum().sum(), key))
-			print('\t' + key + ' _cost')
+			self.printer.print('\t' + key + ' _cost')
 			if pd.isnull(self.sess.run(self._cost, self.run_dict)):
 				assert False, "Cost is null"
-			print('\t' + key + ' _full_costs')
+			self.printer.print('\t' + key + ' _full_costs')
 			if pd.isnull(self.sess.run(self._full_cost, self.run_dict)):
 				assert False, "Full cost is null"
 
@@ -1913,8 +2003,8 @@ class Chronos(object):
 		'''
 		return {
 			key: np.concatenate(self.guide_gene_map[key].groupby("gene").sgrna.apply(lambda x: 
-                                      np.random.choice(x, size=int(np.ceil(len(x)/3)), replace=False)
-                                     ).values)
+									  np.random.choice(x, size=int(np.ceil(len(x)/3)), replace=False)
+									 ).values)
 			for key in self.keys
 		}
 
@@ -2023,41 +2113,41 @@ class Chronos(object):
 				projected = delta * to_go/completed
 
 				if completed > 1:
-					print('%i epochs trained, time taken %s, projected remaining %s' % 
+					self.printer.print('%i epochs trained, time taken %s, projected remaining %s' % 
 						(i+1, timedelta(seconds=round(delta)), timedelta(seconds=round(projected)))
 					)
-				print('NB2 cost', self.cost)
-				print("Full cost", self.full_cost)
-				print('relative_growth_rate')
+				self.printer.print('NB2 cost', self.cost)
+				self.printer.print("Full cost", self.full_cost)
+				self.printer.print('relative_growth_rate')
 				for key, val in self.growth_rate.items():
-					print('\t%s max %1.3f, min %1.5f' % (
+					self.printer.print('\t%s max %1.3f, min %1.5f' % (
 						key, val[val!=0].max(), val[val!=0].min()))
-				print('mean guide efficacy', self.guide_efficacy.mean())
-				print('t0_offset SD: %r' % [(key, self.t0_offset[key].std()) for key in self.keys]) 
-				print()
+				self.printer.print('mean guide efficacy', self.guide_efficacy.mean())
+				self.printer.print('t0_offset SD: %r' % [(key, self.t0_offset[key].std()) for key in self.keys]) 
+				self.printer.print()
 				ge = self.gene_effect
-				print('gene mean', ge.mean().mean())
-				print('SD of gene means', ge.mean().std())
-				print("Mean of gene SDs", ge.std().mean())
+				self.printer.print('gene mean', ge.mean().mean())
+				self.printer.print('SD of gene means', ge.mean().std())
+				self.printer.print("Mean of gene SDs", ge.std().mean())
 				for key, val in additional_metrics.items():
-					print(key, val(ge))
+					self.printer.print(key, val(ge))
 				if essential_genes is not None:
-					print("Fraction Ess gene scores in bottom 15%%:", (ge.rank(axis=1, pct=True)[essential_genes] < .15).mean().mean()
+					self.printer.print("Fraction Ess gene scores in bottom 15%%:", (ge.rank(axis=1, pct=True)[essential_genes] < .15).mean().mean()
 					)
-					print("Fraction Ess gene medians in bottom 15%%:", (ge.median().rank(pct=True)[essential_genes] < .15).mean()
+					self.printer.print("Fraction Ess gene medians in bottom 15%%:", (ge.median().rank(pct=True)[essential_genes] < .15).mean()
 					)
 				if nonessential_genes is not None:
-					print("Fraction Ness gene scores in top 85%%:", (ge.rank(axis=1, pct=True)[nonessential_genes] > .15).mean().mean()
+					self.printer.print("Fraction Ness gene scores in top 85%%:", (ge.rank(axis=1, pct=True)[nonessential_genes] > .15).mean().mean()
 					)
-					print("Fraction Ness gene medians in top 85%%:", (ge.median().rank(pct=True)[nonessential_genes] > .15).mean()
+					self.printer.print("Fraction Ness gene medians in top 85%%:", (ge.median().rank(pct=True)[nonessential_genes] > .15).mean()
 					)
 
-				print('\n\n')
+				self.printer.print('\n\n')
 
 
 #########################               I  /  O              ###################################           
-                
-                
+				
+				
 	def load(self, gene_effect, guide_efficacy, t0_offset, screen_delay, cell_efficacy, 
 		library_effect):
 		'''
@@ -2066,17 +2156,17 @@ class Chronos(object):
 		if self._pretrained != True:
 			raise RuntimeError("Model is built to train without existing data. \
 To load a pretrained model, you must reinitialize Chronos with `pretrained=True`")
-        
-        # convert cell_line_efficacy output into dictionary of cell lines to sets of library names
+		
+		# convert cell_line_efficacy output into dictionary of cell lines to sets of library names
 		cells_to_libraries_screened = dict()
 		for cell_id in cell_efficacy.index:
-            # only keep the libraries that are present in the newest data (self.keys)
+			# only keep the libraries that are present in the newest data (self.keys)
 			cells_to_libraries_screened[cell_id] = set(
 				cell_efficacy\
 				.loc[cell_id, ~cell_efficacy.loc[cell_id, :].isna()]\
 				.index
 			).intersection(self.keys)
-        
+		
 		missing = set(self.keys) - set.union(*[libs for libs in cells_to_libraries_screened.values()])
 		if len(missing):
 			raise ValueError(
@@ -2084,7 +2174,7 @@ To load a pretrained model, you must reinitialize Chronos with `pretrained=True`
 that includes all the libraries in the new screen(s), run Chronos without a pretrained model, or exclude those libraries from \
 your data" % missing
 			)
-        
+		
 		mask = {}
 		for cell in self.all_cells:
 			if cell in cells_to_libraries_screened:
@@ -2105,23 +2195,23 @@ your data" % missing
 		self._gene_effect_mask = _gene_effect_mask
 		self.mask_count = mask_count
 
-        # want to use the gene_effect matrix and not v_mean_effect's mean because the training data's masking is relevant
+		# want to use the gene_effect matrix and not v_mean_effect's mean because the training data's masking is relevant
 		means = gene_effect.mean().reindex(index=self.all_genes).values.reshape(1, -1)
 		self.sess.run(self.v_mean_effect.assign(means))
-        
+		
 		self.guide_efficacy = guide_efficacy
 
 		self.t0_offset = t0_offset
-        
+		
 		self.screen_delay = screen_delay
-        
+		
 		self.library_effect = library_effect
-        
+		
 		self._is_model_loaded = True
-		print('Chronos model loaded')
-		print('ready to train')
-    
-    
+		self.printer.print('Chronos model loaded')
+		self.printer.print('ready to train')
+	
+	
 	def import_model(self, directory):
 		'''
 		Quickly load a subset of Chronos parameters from a directory. 
@@ -2160,8 +2250,8 @@ your data" % missing
 			screen_delay = pd.Series(3, index=gene_effect.columns)
 		library_effect = pd.read_csv(os.path.join(directory, 'library_effect.csv'), index_col=0)        
 		self.load(gene_effect, guide_efficacy, t0_offset, screen_delay, cell_line_efficacy, library_effect)
-           
-        
+		   
+		
 
 	def save(self, directory, overwrite=False, include_inputs=True, include_outputs=True):
 		'''
@@ -2395,7 +2485,7 @@ your data" % missing
 		return {key: pd.DataFrame(self.sess.run(self._cost_presum[key], self.run_dict), 
 							  index=self.index_map[key], columns=self.column_map[key])
 				for key in self.keys}
-    
+	
 
 	@property
 	def days(self):
@@ -2424,14 +2514,13 @@ your data" % missing
 		}
 		return {
 			key: pd.DataFrame(
-				  	output[key].values \
+					output[key].values \
 					/ measured_t0[key].loc[mapper[key]].values,
 				index=output[key].index, 
 				columns=output[key].columns
 			)
 			for key in self.keys
 		}
-
 
 
 	@property
@@ -2472,6 +2561,15 @@ your data" % missing
 		residue = pd.DataFrame(de.values - means).fillna(0).values
 		self.sess.run(self.v_mean_effect.assign(means))
 		self.sess.run(self.v_residue.assign(residue))
+
+
+	@property
+	def gene_effect_hierarchical(self):
+		return self.run_dict[self._gene_effect_hierarchical]
+
+	@gene_effect_hierarchical.setter
+	def gene_effect_hierarchical(self, desired_gene_effect_hierarchical):
+		self.run_dict[self._gene_effect_hierarchical] = desired_gene_effect_hierarchical
 		
 
 	@property
