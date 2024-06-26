@@ -565,8 +565,11 @@ every map.")
 			self.distinguished_likelihood, 
 			self.permuted_likelihoods
 		)
-
-		significance["likelihood_fdr"] = fdrcorrection(significance["likelihood_pval"], .05)[1]
+		mask = significance["likelihood_pval"].notnull()
+		significance["likelihood_fdr"] = pd.Series(
+			fdrcorrection(significance["likelihood_pval"][mask], .05)[1],
+			index=significance.index[mask]
+		)
 
 		return gene_effect_annotations\
 			.merge(significance, on=["cell_line_name", "gene"], how="outer")
@@ -695,37 +698,36 @@ every map.")
 	. If you have a sub-genome library, considering changing `gene_readcount_total_bin_quantiles` so there are \
 	more genes in each bin." % (len(genes)))
 
-			significance = []
-			null = pd.concat([v.loc[line, genes] - undistinguished_likelihood.loc[line, genes] 
-				for v in permuted_likelihoods], ignore_index=True)
-			observed = distinguished_likelihood.loc[line, genes] - undistinguished_likelihood.loc[line, genes]
+				null = pd.concat([v.loc[line, genes] - undistinguished_likelihood.loc[line, genes] 
+					for v in permuted_likelihoods], ignore_index=True)
+				observed = distinguished_likelihood.loc[line, genes] - undistinguished_likelihood.loc[line, genes]
 
-			p = empirical_pvalue(observed, null, direction=1)
-			# use the lognormal model for the null to extend p-values beyond most extreme null value
-			intercept, s = fit_weighted_lognorm(null)
-			p2 = lognorm_likelihood_p(observed, intercept, s)
-			p.mask(observed > null.max(), p2, inplace=True)
+				p = empirical_pvalue(observed, null, direction=1)
+				# use the lognormal model for the null to extend p-values beyond most extreme null value
+				intercept, s = fit_weighted_lognorm(null)
+				p2 = lognorm_likelihood_p(observed, intercept, s)
+				p.mask(observed > null.max(), p2, inplace=True)
 
-			out.append(pd.DataFrame({
-				"likelihood": distinguished_likelihood.loc[line],
-				"likelihood_undistinguished": undistinguished_likelihood.loc[line],
-				"likelihood_permutation_0": permuted_likelihoods[0].loc[line],
-				"likelihood_permutation_1": permuted_likelihoods[1].loc[line],
-				"likelihood_pval": p, 
-				"cell_line_name": line,
-				"readcount_bin": bin
-			}))
+				out.append(pd.DataFrame({
+					"likelihood": distinguished_likelihood.loc[line, genes],
+					"likelihood_undistinguished": undistinguished_likelihood.loc[line, genes],
+					"likelihood_permutation_0": permuted_likelihoods[0].loc[line, genes],
+					"likelihood_permutation_1": permuted_likelihoods[1].loc[line, genes],
+					"likelihood_pval": p, 
+					"cell_line_name": line,
+					"readcount_bin": bin
+				}))
 
-			for key, val in additional_annotations:
-				if isinstance(val, pd.Series):
-					try:
-						val = val.loc[line].loc[genes]
-					except IndexError:
-						raise ValueError("additional annotation '%s' missing genes:\n%r" %
-							(key, val))
-				out[-1][key] = val
-			out[-1].reset_index(inplace=True)
-			out[-1].rename(columns={out[-1].columns[0]: "gene"})
+				for key, val in additional_annotations:
+					if isinstance(val, pd.Series):
+						try:
+							val = val.loc[line].loc[genes]
+						except IndexError:
+							raise ValueError("additional annotation '%s' missing genes:\n%r" %
+								(key, val))
+					out[-1][key] = val
+				out[-1].reset_index(inplace=True)
+				out[-1].rename(columns={out[-1].columns[0]: "gene"})
 		return pd.concat(out, ignore_index=True)
 
 
