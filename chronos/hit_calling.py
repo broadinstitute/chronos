@@ -12,27 +12,30 @@ from sklearn.linear_model import LinearRegression
 from sympy.utilities.iterables import multiset_permutations
 
 
-def fit_weighted_lognorm(x):
-	'''fit a lognormal distribution to `pandas.Series` `x` using auxiliary linear regression 
-	on the inverse normal cumulative density function vs log(`x`). `x` is clipped to be positive
-	and the regression is weighted by the value of `x` so the fit focuses heavily on matching
-	the right tail.
-	Returns:
-		`intercept`, `s`: the intercept and coefficient from the auxiliary linear regression.
-	'''
-	logged = np.log(x.clip(1e-4, np.inf)).sort_values().dropna()
-	grid = np.linspace(1/len(logged), 1-1/len(logged), len(logged))
-	idf = norm.ppf(grid)
-
-	weight = x.sort_values().clip(0, np.inf)
-	weight /= weight.sum()
-
-
-	linear = LinearRegression()
-	linear.fit(X=idf[:, np.newaxis], y=logged.values, sample_weight=weight)
-	if pd.isnull(linear.coef_[0]) or pd.isnull(linear.intercept_):
-		raise ValueError("Linear regression failed to fit logged values to gaussian inverse CDF with `x`=%r" % (x, ))
-	return linear.intercept_, linear.coef_[0]
+def fit_weighted_lognorm(x, keep_points=20):
+    '''fit a lognormal distribution to `pandas.Series` `x` using auxiliary linear regression 
+    on the inverse normal cumulative density function vs log(`x`). `x` is clipped to be positive
+    and the regression is weighted by the value of `x` so the fit focuses heavily on matching
+    the right tail.
+    Returns:
+        `intercept`, `s`: the intercept and coefficient from the auxiliary linear regression.
+    '''
+    x = x.sort_values()
+    logged = np.log(x.clip(1e-4, np.inf)).sort_values().dropna()
+    
+    grid = np.linspace(1/len(logged), 1-1/len(logged), len(logged))[-keep_points:]
+    logged = logged[-keep_points:]
+    idf = norm.ppf(grid)
+    
+    weight = x.clip(0, np.inf)[-keep_points:]
+    weight /= weight.sum()
+    
+    
+    linear = LinearRegression()
+    linear.fit(X=idf[:, np.newaxis], y=logged.values, sample_weight=weight)
+    if pd.isnull(linear.coef_[0]) or pd.isnull(linear.intercept_):
+        raise ValueError("Linear regression failed to fit logged values to gaussian inverse CDF with `x`=%r" % (x, ))
+    return linear.intercept_, linear.coef_[0]
 
 
 def lognorm_likelihood_p(x, intercept, s):
