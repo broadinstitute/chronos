@@ -20,7 +20,7 @@ except:
 	adjust_text_present = False
 
 
-def lowess_trend(x, y, frac=.25, max_points=300, min_points=20, delta_frac=.005, **kwargs):
+def lowess_trend(x, y, frac=.25, max_points=2000, min_points=50, delta_frac=.01, **kwargs):
 	'''
 	A wrapper for statsmodel's lowess with a somewhat more useful parameterization
 	Parameters:

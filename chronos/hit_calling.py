@@ -5,10 +5,50 @@ from .model import Chronos, check_inputs
 from .reports import sum_collapse_dataframes
 from warnings import warn
 from itertools import permutations
-from scipy.stats import gaussian_kde, norm
+from scipy.stats import gaussian_kde, norm, lognorm
 from scipy.interpolate import interp1d
 from scipy.signal import argrelextrema
+from sklearn.linear_model import LinearRegression
 from sympy.utilities.iterables import multiset_permutations
+
+
+def fit_weighted_lognorm(x, keep_points=20):
+    '''fit a lognormal distribution to `pandas.Series` `x` using auxiliary linear regression 
+    on the inverse normal cumulative density function vs log(`x`). `x` is clipped to be positive
+    and the regression is weighted by the value of `x` so the fit focuses heavily on matching
+    the right tail.
+    Returns:
+        `intercept`, `s`: the intercept and coefficient from the auxiliary linear regression.
+    '''
+    x = x.sort_values()
+    logged = np.log(x.clip(1e-4, np.inf)).sort_values().dropna()
+    
+    grid = np.linspace(1/len(logged), 1-1/len(logged), len(logged))[-keep_points:]
+    logged = logged[-keep_points:]
+    idf = norm.ppf(grid)
+    
+    weight = x.clip(0, np.inf)[-keep_points:]
+    weight /= weight.sum()
+    
+    
+    linear = LinearRegression()
+    linear.fit(X=idf[:, np.newaxis], y=logged.values, sample_weight=weight)
+    if pd.isnull(linear.coef_[0]) or pd.isnull(linear.intercept_):
+        raise ValueError("Linear regression failed to fit logged values to gaussian inverse CDF with `x`=%r" % (x, ))
+    return linear.intercept_, linear.coef_[0]
+
+
+def lognorm_likelihood_p(x, intercept, s):
+	'''
+	find the right-tailed p-values for `x` using a lognormal distribution
+	to model `x` under the null hypothesis.
+	Parameters:
+		`x` (`pandas.Series`): 1D data to be fit. Assumed to be a difference in likelihood.
+		`intercept`: the offset found from `fit_weighted_lognorm` on the null distribution
+		`s`: the parameter of the lognormal distribution
+	'''
+	p = pd.Series(1-norm(scale=s, loc=intercept).cdf(np.log(x.clip(1e-4, np.inf))), index=x.index)
+	return p
 
 
 def cell_line_log_likelihood(model, distinguished_condition_map):
@@ -392,9 +432,9 @@ every map.")
 
 
 	def compare_conditions(self, condition_pair=None,
-		gene_readcount_total_bin_quantiles=[0.05], 
 		allow_reversed_permutations=False,
-			max_null_iterations=20,
+			max_null_iterations=2,
+			gene_readcount_total_bin_quantiles=[.05],
 				**kwargs):
 		'''
 		Generate a table with the significance of differences in gene effect between two conditions.
@@ -454,6 +494,9 @@ every map.")
 			self.condition_map[key], condition_pair)
 			for key in self.keys
 		}
+		for val in self.nondistinguished_map.values():
+			val["true_cell_line_name"] = val["cell_line_name"].copy()
+
 		self.retained_readcounts = {
 			key:self.readcounts[key].loc[self.nondistinguished_map[key].sequence_ID]
 			for key in self.keys
@@ -465,18 +508,24 @@ every map.")
 			self.retained_readcounts, self.condition_map, self.guide_gene_map
 		)
 
+		print("training model without conditions distinguished")
+		self.undistinguished_likelihood = self.get_undistinguished_results(
+			self.nondistinguished_map, **kwargs
+		)
+
 		print("training model with conditions distinguished")
-		self.distinguished_map, self.distinguished_result, \
+		self.distinguished_map, self.distinguished_likelihood, \
 			distinguished_gene_effect = self.get_distinguished_results(
 			self.nondistinguished_map, condition_pair,
-			self.readcount_gene_totals, **kwargs
+			 **kwargs
 		)
 
 		print("training models with permuted conditions")
-		self.permuted_maps, self.permuted_results, \
+		self.permuted_maps, self.permuted_likelihoods, \
 			permuted_gene_effects = self.get_permuted_results(
 			max_null_iterations, self.nondistinguished_map, condition_pair, 
-			allow_reversed_permutations, **kwargs
+			allow_reversed_permutations,
+			**kwargs
 		)
 
 
@@ -510,11 +559,19 @@ every map.")
 
 
 		print("calculating empirical significance")
-		significance = self.get_significance_by_readcount_bin(
-			self.readcount_gene_totals, self.distinguished_map,
+		significance = self.get_significance(
+			gene_readcount_total_bin_quantiles,
+			self.readcount_gene_totals,
+			self.distinguished_map,
 			self.compared_lines,
-			self.distinguished_result, self.permuted_results,
-			gene_readcount_total_bin_quantiles
+			self.undistinguished_likelihood,
+			self.distinguished_likelihood, 
+			self.permuted_likelihoods
+		)
+		mask = significance["likelihood_pval"].notnull()
+		significance["likelihood_fdr"] = pd.Series(
+			fdrcorrection(significance["likelihood_pval"][mask], .05)[1],
+			index=significance.index[mask]
 		)
 
 		return gene_effect_annotations\
@@ -535,8 +592,23 @@ every map.")
 		return readcount_gene_totals
 
 
+	def get_undistinguished_results(self, nondistinguished_map, **kwargs):
+		undistinguished_model = Chronos(
+			readcounts=self.retained_readcounts,
+			sequence_map=nondistinguished_map,
+			guide_gene_map=self.guide_gene_map,
+			 use_line_mean_as_reference=np.inf,
+			 print_to=self.print_to,
+			**self.kwargs
+		)
+		undistinguished_model.train(**kwargs)
+		likelihood = cell_line_log_likelihood(undistinguished_model, nondistinguished_map)
+		del undistinguished_model
+		return likelihood
+
+
 	def get_distinguished_results(self, nondistinguished_map, condition_pair,
-			readcount_gene_totals, **kwargs
+			 **kwargs
 		):
 
 		distinguished_map = {key:
@@ -555,15 +627,10 @@ every map.")
 		distinguished_model.train(**kwargs)
 
 		distinguished_gene_effect = distinguished_model.gene_effect
-		distinguished_result = {comparison_effect: func(
-				distinguished_model, distinguished_map, condition_pair
-			)
-			for comparison_effect, func in self.comparison_effect_dict.items()
-		}
-		#del distinguished_model
-		self.distinguished_model = distinguished_model
+		distinguished_likelihood = cell_line_log_likelihood(distinguished_model, distinguished_map)
+		del distinguished_model
 
-		return distinguished_map, distinguished_result, distinguished_gene_effect
+		return distinguished_map, distinguished_likelihood, distinguished_gene_effect
 
 
 	def get_permuted_results(self, max_null_iterations, nondistinguished_map, condition_pair, 
@@ -581,7 +648,7 @@ every map.")
 		permuted_gene_effects = []
 		counts = 0
 		for i, permuted_map in enumerate(permuted_maps):
-			print('\n\n&&&&&&&&&&&&&&&&\nrandom iteration %i\n&&&&&&&&&&&&&&&&\n\n' %i)
+			print('\trandom iteration %i' %i)
 				
 			permuted_model = Chronos(readcounts=self.retained_readcounts, 
 								 sequence_map=permuted_map,
@@ -592,11 +659,7 @@ every map.")
 								)
 			permuted_model.train(**kwargs)
 
-			out.append({comparison_effect: func(
-					permuted_model, permuted_map, condition_pair
-				)
-				for comparison_effect, func in self.comparison_effect_dict.items()
-			})
+			out.append(cell_line_log_likelihood(permuted_model, permuted_map))
 			permuted_gene_effects.append(permuted_model.gene_effect)
 			del permuted_model
 
@@ -607,46 +670,56 @@ every map.")
 		return permuted_maps, out, permuted_gene_effects
 
 
-	def get_significance_by_readcount_bin(self, readcount_gene_totals,
-		distinguished_map, compared_lines, observed_statistic, permuted_statistics, 
-			gene_readcount_total_bin_quantiles,  additional_annotations={}
+	def get_significance(self, 
+			gene_readcount_total_bin_quantiles, 
+			readcount_gene_totals,
+			distinguished_map, 
+			compared_lines,
+			undistinguished_likelihood, 
+			distinguished_likelihood, 
+			permuted_likelihoods, 
+			additional_annotations={}
 		):
 
-		bins = readcount_gene_totals.quantile([0] + gene_readcount_total_bin_quantiles + [1])
+		bins = readcount_gene_totals.quantile([0] + list(gene_readcount_total_bin_quantiles) + [1])
 		bins[0] = 0
 		bins[1.0] *= 1.05
 		bins = pd.cut(readcount_gene_totals, bins)
+
 		out = []
 		bin_assignments = []
 
 		for line in compared_lines:
 			if line == 'pDNA':
 				continue
+
 			for bin in sorted(bins.unique()):
 				genes = bins.loc[lambda x: x==bin].index
-				
 
 				if len(genes) < 100:
 					warn("Only %i genes in one of your bins. This will limit the minimum achievable p-value \
-. If you have a sub-genome library, considering changing `gene_readcount_total_bin_quantiles` so there are \
-more genes in each bin." % (len(genes)))
+	. If you have a sub-genome library, considering changing `gene_readcount_total_bin_quantiles` so there are \
+	more genes in each bin." % (len(genes)))
 
-				significance = []
-				for comparison_effect, tail in self.comparison_effect_tail_dict.items():
-					null = pd.concat([v[comparison_effect].loc[line, genes] for v in permuted_statistics]) 
-					significance.append(get_difference_significance(
-						observed_statistic[comparison_effect].loc[line, genes], 
-						null,
-						tail=tail
-					))
-					significance[-1].rename(columns={
-						col: "%s_%s" % (comparison_effect, col) 
-						for col in significance[-1].columns
-					}, inplace=True)
+				null = pd.concat([v.loc[line, genes] - undistinguished_likelihood.loc[line, genes] 
+					for v in permuted_likelihoods], ignore_index=True)
+				observed = distinguished_likelihood.loc[line, genes] - undistinguished_likelihood.loc[line, genes]
 
-				out.append(pd.concat(significance, axis=1))
-				out[-1]["cell_line_name"] = line
-				out[-1]["total_readcount_bin"] = bin
+				p = empirical_pvalue(observed, null, direction=1)
+				# use the lognormal model for the null to extend p-values beyond most extreme null value
+				intercept, s = fit_weighted_lognorm(null)
+				p2 = lognorm_likelihood_p(observed, intercept, s)
+				p.mask(observed > null.max(), p2, inplace=True)
+
+				out.append(pd.DataFrame({
+					"likelihood": distinguished_likelihood.loc[line, genes],
+					"likelihood_undistinguished": undistinguished_likelihood.loc[line, genes],
+					"likelihood_permutation_0": permuted_likelihoods[0].loc[line, genes],
+					"likelihood_permutation_1": permuted_likelihoods[1].loc[line, genes],
+					"likelihood_pval": p, 
+					"cell_line_name": line,
+					"readcount_bin": bin
+				}))
 
 				for key, val in additional_annotations:
 					if isinstance(val, pd.Series):
@@ -667,12 +740,12 @@ more genes in each bin." % (len(genes)))
 
 
 def smooth(x, sigma):
-    '''smooth with a gaussian kernel'''
+	'''smooth with a gaussian kernel'''
 
 
-    kernel = np.exp(-.5 * np.arange(int(-4 * sigma), int(4 * sigma + 1), 1) ** 2 / sigma ** 2)
-    kernel = kernel / sum(kernel)
-    return np.convolve(x, kernel, 'same')
+	kernel = np.exp(-.5 * np.arange(int(-4 * sigma), int(4 * sigma + 1), 1) ** 2 / sigma ** 2)
+	kernel = kernel / sum(kernel)
+	return np.convolve(x, kernel, 'same')
 
 
 ### Infer class probabilities

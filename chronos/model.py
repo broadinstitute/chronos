@@ -234,8 +234,8 @@ def moving_average(a, n=3) :
 	return ret[n - 1:] / n
 
 def venter_mode(x, exclude=.1, windows=10):
-	if (x > 0).sum() < 500:
-		print("%s has less than 500 nonzero entries, returning median instead of mode" % x.name)
+	if (x > 0).sum() < 2000:
+		warn(f'{x.name} has less than 2000 nonzero entries, returning median instead of mode')
 		return x.median()
 	sort_x = x[x > 0].sort_values()
 	window = len(sort_x)//windows
@@ -244,6 +244,7 @@ def venter_mode(x, exclude=.1, windows=10):
 	interval_start = np.argmin(rolling[trim:-trim])+trim
 
 	return sort_x.iloc[interval_start:interval_start+window].mean()
+
 
 def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=None):
 	'''
@@ -263,10 +264,8 @@ def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=
 													median of negative controls in each replicate matches the median
 													of the negative controls in the corresponding pDNA batch
 	'''
-	if readcounts.shape[1] < 2000:
-		warn("Readcounts has less than 2000 guides, using median normalization")
-		return (readcounts.T / readcounts.T.median()).T
-	elif negative_control_sgrnas is None:
+	
+	if negative_control_sgrnas is None:
 		warn("No negative control sgRNAs supplied, aligning modes")
 		return (
 				readcounts.mean().mean()*(
@@ -382,9 +381,10 @@ systematically over- or under-represented in the screens and excluded." % (
 	))
 
 	mask = ~(logdiff.abs() < exclude_range)
-	if (1-mask).sum(axis=1).min() < 100:
-		raise ValueError("Fewer than 100 negative control sgRNAs remaining in one or more \
-batches, too few to estimate overdispersion.")
+	if (1-mask).sum(axis=1).min() < 20:
+		raise ValueError("Fewer than 20 negative control sgRNAs remaining in one or more \
+batches, too few to estimate overdispersion. Try passing a specific manual value for \
+ overdispersion, such as 0.04")
 	# if there are less than `use_line_mean_as_reference` lines in a batch, we don't want to 
 	# exclude negative controls on the basis of being offset. 
 	n_lines = sequence_map\
@@ -648,7 +648,7 @@ class Chronos(object):
 				 gene_effect_L1=0.1,
 				 gene_effect_L2=0,
 				 offset_reg=1,
-				 excess_variance=0.02,
+				 excess_variance=None,
 				 guide_efficacy_reg=.01,
 				 library_batch_reg=.1,
 				
@@ -723,7 +723,7 @@ class Chronos(object):
 								the median in the pDNA batch. 
 			use_line_mean_as_reference (`int`): passed to `estimate_alpha`
 			print_to (`str` or `None`): where to print ordinary messages from Chronos. Default is `stdout`. Pass a file path to print
-								to the file or 
+								to the file or `None` to skip these messages.
 
 		Attributes:
 			Attributes beginning wit "v_" are tensorflow variables, and attributes beginning with _ are 
@@ -1051,9 +1051,14 @@ class Chronos(object):
 
 
 	def _check_excess_variance(self, excess_variance, readcounts, sequence_map):
+		if excess_variance is None:
+			return {}
 		if not isinstance(excess_variance, dict):
 			try:
-				excess_variance = float(excess_variance) 
+				excess_variance = float(excess_variance)
+				return {key: pd.Series(excess_variance, 
+					index=val.query("cell_line_name != 'pDNA'").sequence_ID)
+				for key, val in sequence_map.items()} 
 			except ValueError:
 				raise ValueError("if provided, excess_variance must be a dict of pd.Series per library or a float")
 		else:
