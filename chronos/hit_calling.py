@@ -301,8 +301,7 @@ def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reve
 the 'condition' column of `condition_map` must have exactly two unique values for non-pDNA entries.")
 
 	#drop days column for identifying possible permutations
-	days_map = seq_map[['cell_line_name','days']].drop_duplicates()
-	base = seq_map.drop(columns=['days','sequence_ID']).drop_duplicates()
+	base = seq_map[["cell_line_name", "condition", "replicate", "pDNA_batch"]].drop_duplicates()
 	
 	splits = base.groupby('cell_line_name')
 	stack = {}
@@ -321,17 +320,17 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 			perms = unique_permutations_no_reversed(y.condition)
 
 		for perm in perms:
-				tentative = y.copy()
-				tentative["true_condition"] = tentative["condition"]
-				tentative["condition"] = perm
-				tentative["cell_line_name"] = line
+			tentative = y.copy()
+			tentative["true_condition"] = tentative["condition"]
+			tentative["condition"] = perm
+			tentative["cell_line_name"] = line
 
-				#check that the pseudo conditions have equal numbers of replicates from each real condition
-				condition_counts = tentative.groupby("condition").true_condition.value_counts()
-				if \
-						len(condition_counts) == 4 \
-					 and condition_counts.min() == condition_counts.max():
-					stack[line].append(tentative)
+			#check that the pseudo conditions have equal numbers of replicates from each real condition
+			condition_counts = tentative.groupby("condition").true_condition.value_counts()
+			if \
+					len(condition_counts) == 4 \
+				 and condition_counts.min() == condition_counts.max():
+				stack[line].append(tentative)
 
 	min_unique_permutations = min(len(v) for v in stack.values())
 	out = []
@@ -340,11 +339,9 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 		#outer merge is to add back sequence ids for each row
 		out.append(
 			pd.merge(
-				pd.merge(
-					pd.concat([v[i] for v in stack.values()] + [pdna]), 
-					days_map
-				),
-				seq_map.rename(columns={'condition':'true_condition'}) 
+				pd.concat([v[i] for v in stack.values()] + [pdna]), 
+				seq_map.rename(columns={'condition':'true_condition'}),
+				how="outer" 
 			)
 		) 
 
@@ -568,14 +565,20 @@ every map.")
 			self.distinguished_likelihood, 
 			self.permuted_likelihoods
 		)
-		mask = significance["likelihood_pval"].notnull()
-		significance["likelihood_fdr"] = pd.Series(
-			fdrcorrection(significance["likelihood_pval"][mask], .05)[1],
-			index=significance.index[mask]
-		)
+		significance_groups = significance.groupby("cell_line_name")
+		fdrs = []
+		for line, group in significance_groups:
+			group = group.dropna(subset="likelihood_pval")
+			fdrs.append(pd.DataFrame({
+				"likelihood_fdr": fdrcorrection(group["likelihood_pval"], .05)[1],
+				"cell_line_name": line,
+				"gene": group.gene
+			}))
+		fdrs = pd.concat(fdrs)
 
 		return gene_effect_annotations\
-			.merge(significance, on=["cell_line_name", "gene"], how="outer")
+			.merge(significance, on=["cell_line_name", "gene"], how="outer")\
+			.merge(fdrs, on=["cell_line_name", "gene"], how="outer")
 
 
 	def get_readcount_gene_totals(self, retained_readcounts, condition_map, guide_gene_map):
