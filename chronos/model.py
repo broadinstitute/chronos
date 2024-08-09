@@ -88,9 +88,11 @@ def check_if_unique(dictionary):
 	checks if any of the (iterable of hashable) values in `dictionary` have overlapping 
 	entries with any other value. Returns True if unique.
 	'''
+	if len(dictionary) == 1:
+		return True
 	keys = sorted(dictionary.keys())
 	for i, key1 in enumerate(keys):
-		for key2 in keys[i:]:
+		for key2 in keys[i+1:]:
 			overlap = set(dictionary[key1]) & set(dictionary[key2])
 			if len(overlap):
 				return False
@@ -673,11 +675,22 @@ class Chronos(object):
 				for each library, but the user can also make separate individual datasets according to some other condition,
 				such as screening site.
 			sequence_map (`dict` of `pandas.DataFrame`): Keys must match the keys of readcounts. Values are tables with the columns: 
-				sequence_ID: matches a row index in the corresponding readcounts matrix. Should uniquely identify a combination of
-							 cell line, replicate, and sequence passage.
-				cell_line: name of corresponding cell line. 'pDNA' if this is a plasmid DNA or initial count measurement.
-				days: estimate number of cell days from infection when readcounts were performed. Plasmid DNA entries should be 0.
-				pDNA_batch: Unique identifier for associating readcounts to time 0 readcounts. 
+				Required columns:
+					sequence_ID: matches a row index in the corresponding readcounts matrix. Should uniquely identify a combination
+					 	of cell line, replicate, and sequence passage.
+					cell_line: name of corresponding cell line. 'pDNA' if this is a plasmid DNA or initial count measurement.
+					days: estimate number of cell days from infection when readcounts were performed. Plasmid DNA entries should be 0.
+					pDNA_batch: Unique identifier for associating readcounts to time 0 readcounts. 
+				Optional meaningful columns:
+					replicate_ID: a unique ID per replicate. If passed, the "replicate" column will be ignored. We strongly
+						recommend against constructing this yourself unless you understand the implications. Replicate_IDs
+						should be unique to library, pDNA_batch, and condition (if present).
+					replicate: name of a replicate. Used to associate multiple sequences of the same biological replicate.
+						This relevant for replicate_efficacy and growth_rate, which are indexed by an ID that is unique per 
+						replicate. When missing, it is assumed that every late timepoint is a distinct biological replicate.
+					condition: the condition the replicate is screened in. When two sequences with the same entry for "replicate"
+						are in different conditions, they will be automatically treated as different replicates.
+				Other columns are ignored.
 			guide_gene_map (`dict` of `pandas.DataFrame`): Values are tables with the columns:
 				sgrna: guide sequence or unique guide identifier
 				gene: gene mapped to by guide. Genes should follow consistent naming conventions between libraries
@@ -763,8 +776,10 @@ class Chronos(object):
 		self.guide_gene_map = guide_gene_map
 
 
-		sequence_map = self._make_pdna_unique(sequence_map, readcounts)
-		self._assign_replicate_IDs(sequence_map)
+		sequence_map = Chronos._make_pdna_unique(sequence_map, readcounts)
+		for key, val in sequence_map.items():
+			if not "replicate_ID" in val:
+				Chronos._assign_replicate_IDs(val)
 		if to_normalize_readcounts:
 			self.printer.print("normalizing readcounts")
 			readcounts = {key: normalize_readcounts(val, negative_control_sgrnas.get(key), sequence_map[key])
@@ -1040,7 +1055,7 @@ class Chronos(object):
 
 ###########################    I N I T I A L      C  H  E  C  K  S  ############################
 
-	def _make_pdna_unique(self, sequence_map, readcounts):
+	def _make_pdna_unique(sequence_map, readcounts):
 		#guarantee unique pDNA batches
 		if check_if_unique({key: val['pDNA_batch'] for key, val in sequence_map.items()}):
 			return sequence_map
@@ -1051,26 +1066,31 @@ class Chronos(object):
 		return sequence_map
 
 
-	def _assign_replicate_IDs(self, sequence_map):
+	def _assign_replicate_IDs(sequence_map):
 		for key, val in sequence_map.items():
 			if "replicate" in val and "condition" in val:
 				val["replicate_ID"] = val.apply(
-					lambda x: '%s_%s__IN__%s_%s' % (x["cell_line_name"], key, x["condition"], x["replicate"]),
+					lambda x: '%s__IN__%s_%s_%s' % (
+						x["cell_line_name"], x["condition"], x["replicate"], x['pDNA_batch']
+					),
 					axis=1
 				)
 			elif "replicate" in val:
 				val["replicate_ID"] = val.apply(
-					lambda x: '%s_%s_%s' % (x["cell_line_name"], key, x["replicate"]),
+					lambda x: '%s_%s_%s' % (
+						x["cell_line_name"], x["replicate"], x['pDNA_batch']
+					),
 					axis=1
 				)
 			elif "condition" in val:
 				val["replicate_ID"] = val.apply(
-					lambda x: '%s_%s__IN__%s' % (x["cell_line_name"], key, x["condition"]),
+					lambda x: '%s__IN__%s_%s' % (x["cell_line_name"], x["condition"], x['pDNA_batch']
+				),
 					axis=1
 				)
 			else:
 				val["replicate_ID"] = val.apply(
-					lambda x: '%s_%s_%s' % (x["cell_line_name"], key, x['sequence_ID']),
+					lambda x: '%s_%s_%s' % (x["cell_line_name"], x['pDNA_batch'], x['sequence_ID']),
 					axis=1
 				)
 

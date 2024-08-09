@@ -266,6 +266,18 @@ in `condition_pair`: %r/n/n%r" % (condition_pair, condition_map))
 	return out[out.sequence_ID.isin(retain_sequences)].copy()
 
 
+def assign_condition_replicate_ID(condition_map):
+	'''
+	Create a condition replicate ID.
+	'''
+	condition_map["replicate_ID"] = condition_map.apply(
+					lambda x: '%s__IN__%s_%s_%s' % (
+						x["cell_line_name"], x["condition"], x["replicate"], x['pDNA_batch']
+					),
+					axis=1
+				)
+
+
 def create_condition_sequence_map(condition_map, condition_pair=None):
 	'''
 	Returns a new map filtered for `condition` in `condition_pair` with cell lines having fewer
@@ -301,7 +313,7 @@ def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reve
 the 'condition' column of `condition_map` must have exactly two unique values for non-pDNA entries.")
 
 	#drop days column for identifying possible permutations
-	base = seq_map[["cell_line_name", "condition", "replicate", "pDNA_batch"]].drop_duplicates()
+	base = seq_map[["cell_line_name", "condition", "replicate_ID", "pDNA_batch"]].drop_duplicates()
 	
 	splits = base.groupby('cell_line_name')
 	stack = {}
@@ -386,7 +398,7 @@ class ConditionComparison():
 			`readcounts` (`dict` of `pandas.DataFrame`): readcount matrices from the experiment.
 					See `model.Chronos`
 			`condition_map` (`dict` of `pandas.DataFrame`): Tables in the same format as `sequence_map`
-					for `model.Chronos`, but with the additional columns `replicate` (e.g. A, B), and 
+					for `model.Chronos`, but now requires `replicate` (e.g. A, B), and 
 					`condition`, which the comparator will compare results between. `condition` can be 
 					any value that can be passed to `str`.
 					Results will be reported separately per cell line.
@@ -398,8 +410,11 @@ class ConditionComparison():
 		check_condition_map(condition_map)
 		check_inputs(readcounts, guide_gene_map, condition_map)
 		self.readcounts = readcounts
-		self.condition_map = condition_map
+		self.condition_map = Chronos._make_pdna_unique(condition_map, readcounts)
+		for key, val in self.condition_map.items():
+			assign_condition_replicate_ID(val)
 		self.guide_gene_map = guide_gene_map
+
 		self.print_to = print_to
 		self.kwargs = kwargs
 		self.keys = sorted(self.readcounts.keys())
