@@ -58,7 +58,7 @@ def cell_line_log_likelihood(model, distinguished_condition_map):
 	cost_presum = [
 		v\
 			.groupby(distinguished_condition_map[key].set_index("sequence_ID")['true_cell_line_name']).sum()\
-			.groupby(model.guide_gene_map[key].set_index("sgrna")["gene"], axis=1).sum()
+			.T.groupby(model.guide_gene_map[key].set_index("sgrna")["gene"]).sum().T
 
 		for key, v in cost_presum.items()
 	]
@@ -602,8 +602,8 @@ every map.")
 		readcount_gene_totals = sum_collapse_dataframes([
 			retained_readcounts[key]\
 						.drop(pdna_seqs[key], axis=0, errors="ignore")\
-						.groupby(guide_gene_map[key].set_index("sgrna")["gene"], axis=1)\
-						.sum()\
+						.T.groupby(guide_gene_map[key].set_index("sgrna")["gene"])\
+						.sum().T\
 						.median(axis=0)
 			for key in self.keys
 		])

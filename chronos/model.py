@@ -189,7 +189,7 @@ def filter_guides(guide_gene_map, max_guides=15):
 	return guide_gene_map
 
 
-def calculate_fold_change(readcounts, sequence_map, rpm_normalize=True):
+def calculate_fold_change(readcounts, sequence_map, rpm_normalize=True, pseudocount=1):
 	'''
 	Calculates fold change as the ratio of the late time points to pDNA
 	Parameters:
@@ -197,6 +197,7 @@ def calculate_fold_change(readcounts, sequence_map, rpm_normalize=True):
 		sequence_map (`pandas.DataFrame`): has string columns "sequence_ID", "cell_line_name", and "pDNA_batch"
 		rpm_normalize (`bool`): whether to normalize readcounts to have constant sum before calculating fold change.
 								Should be true unless readcounts have been previously normalized.
+		pseudocount: added to numerator and denominator before normalizing. Prevents infinities.
 	returns:
 		fold_change (`pd.DataFrame`)
 	'''
@@ -206,15 +207,17 @@ def calculate_fold_change(readcounts, sequence_map, rpm_normalize=True):
 	rpm = readcounts
 	if rpm_normalize:
 		rpm = pd.DataFrame(
-			(1e6 * readcounts.values.T / readcounts.sum(axis=1).values + 1).T,
+			(1e6 * readcounts.values.T / readcounts.sum(axis=1).values).T,
 			index=readcounts.index, columns=readcounts.columns
 		)
 	fc = rpm.loc[reps]
 	pdna_reference = rpm.loc[pdna].groupby(sequence_map.set_index('sequence_ID')['pDNA_batch']).median()
 	try:
-		fc = pd.DataFrame(fc.values/pdna_reference.loc[sequence_map.set_index('sequence_ID').loc[reps, 'pDNA_batch']].values,
+		fc = pd.DataFrame(
+			  (fc.values + pseudocount) 
+			/ (pdna_reference.loc[sequence_map.set_index('sequence_ID').loc[reps, 'pDNA_batch']].values + pseudocount),
 			index=fc.index, columns=fc.columns
-			)
+		)
 	except Exception as e:
 		print(fc.iloc[:3, :3],'\n')
 		print(pdna_reference[:3], '\n')
@@ -376,11 +379,11 @@ to obtain the correctly normalized readcount matrix before using this function."
 	logexpected = logexpected.loc[log_rep_batch_median.index]	
 	logdiff =  log_rep_batch_median - logexpected
 	ndiff = (logdiff.abs() > exclude_range).sum(axis=1)
-	warn("Between %i (batch=%r) and %i (batch=%r) negative control sgRNAs were found to be \
-systematically over- or under-represented in the screens and excluded." % (
-		ndiff.min(), ndiff.index[ndiff == ndiff.min()], 
-		ndiff.max(), ndiff.index[ndiff == ndiff.max()]
-	))
+# 	warn("Between %i (batch=%r) and %i (batch=%r) negative control sgRNAs were found to be \
+# systematically over- or under-represented in the screens and excluded." % (
+# 		ndiff.min(), ndiff.index[ndiff == ndiff.min()], 
+# 		ndiff.max(), ndiff.index[ndiff == ndiff.max()]
+# 	))
 
 	mask = ~(logdiff.abs() < exclude_range)
 	if (1-mask).sum(axis=1).min() < 20:
@@ -475,7 +478,7 @@ def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, 
 	lfc_stack["Mask"] = False
 	bad_rows = np.array(transition_indices)[(maxima > absolute_cutoff) & (gaps > gap_cutoff)]
 	print("found %i outgrowths, %1.1E of the total" % (len(bad_rows), len(bad_rows)/len(lfc_stack)))
-	lfc_stack["Mask"].loc[bad_rows] = True
+	lfc_stack.loc[bad_rows, "Mask"] = True
 
 	print("pivoting mask")
 	mask = pd.pivot(lfc_stack, values="Mask", index="sequence_ID", columns="sgrna")
@@ -562,8 +565,8 @@ all of them must be provided")
 	model.guide_efficacy = pd.read_csv(os.path.join(directory, "guide_efficacy.csv"), index_col=0).iloc[:, 0]
 	model.printer.print("\tcell efficacy")
 	model.replicate_efficacy = pd.read_csv(os.path.join(directory, "replicate_efficacy.csv"), index_col=0)
-	model.printer.print("\tcell growth rate")
-	model.growth_rate = pd.read_csv(os.path.join(directory, "cell_line_growth_rate.csv"), index_col=0)
+	model.printer.print("\tgrowth rate")
+	model.growth_rate = pd.read_csv(os.path.join(directory, "growth_rate.csv"), index_col=0)
 	model.printer.print("\tscreen excess variance")
 	model.excess_variance = pd.read_csv(os.path.join(directory, "screen_excess_variance.csv"), index_col=0)
 	model.printer.print("\tscreen delay")
@@ -1206,7 +1209,7 @@ class Chronos(object):
 		pDNA_unique = {key: sorted(set(val)) 
 			for key, val in pDNA_batches.items()
 		}
-		replicates = {key: val[val.cell_line_name != 'pDNA']['replicate_ID'].unique() 
+		replicates = {key: val[val.cell_line_name != 'pDNA']['replicate_ID'].sort_values().unique() 
 			for key, val in sequence_map.items()
 		}
 		cells = {key: val[val.cell_line_name != 'pDNA']['cell_line_name'].unique() 
@@ -1248,7 +1251,7 @@ and %i unique cell lines in %s" %(
 		sequence_replicate_map = {key: 
 				Chronos.make_map(
 					sequence_map[key][['sequence_ID', 'replicate_ID']].set_index('sequence_ID').iloc[:, 0],
-				 	all_sequences, all_replicates, self.np_dtype)
+				 	all_sequences, replicates[key], self.np_dtype)
 				for key in self.keys
 		}
 		replicate_cell_line_map =  {key: 
@@ -1258,9 +1261,10 @@ and %i unique cell lines in %s" %(
 						.drop_duplicates()\
 						.set_index('replicate_ID')\
 						.iloc[:, 0],
-				 	all_replicates, all_cells, self.np_dtype)
+				 	replicates[key], all_cells, self.np_dtype)
 				for key in self.keys
 		}
+
 		replicate_index = {key: np.array(replicates[key])[replicate_cell_line_map[key]['gather_ind_outer']]
 								for key in self.keys}
 		
@@ -1348,8 +1352,8 @@ and %i unique cell lines in %s" %(
 					.notnull()\
 					.groupby(sequence_map[key].set_index("sequence_ID").cell_line_name)\
 					.any()
-					.groupby(guide_gene_map[key].set_index("sgrna").gene, axis=1)\
-					.any()\
+					.T.groupby(guide_gene_map[key].set_index("sgrna").gene)\
+					.any().T\
 					.reindex(index=self.all_cells, columns=self.all_genes)\
 					.fillna(False)
 			for key in self.keys
@@ -1877,14 +1881,14 @@ guide abundance"
 			# modified with constants and -mu_i - which makes it become the multinomial cost in the limit alpha -> 0
 			_cost_presum = {key:
 				(
-										((_normalized_readcounts[key]+1e-6) + 1./_excess_variance[key]) * tf.math.log(
-											1 + _excess_variance[key] * (_predicted_readcounts[key] + 1e-6)
-									) -
-										(_normalized_readcounts[key]+1e-6) * tf.math.log(
-											(_excess_variance[key] * _predicted_readcounts[key] + 1e-6)
-										)
-									)
-								for key in self.keys}
+					((_normalized_readcounts[key]+1e-6) + 1./_excess_variance[key]) * tf.math.log(
+						1 + _excess_variance[key] * (_predicted_readcounts[key] + 1e-6)
+					) - (_normalized_readcounts[key]+1e-6) * tf.math.log(
+						(_excess_variance[key] * _predicted_readcounts[key] + 1e-6)
+					)
+				)
+				for key in self.keys
+			}
 
 			readcounts = self.normalized_readcounts
 			ev = self.excess_variance
@@ -2002,8 +2006,8 @@ guide abundance"
 								.loc[last_sequences]\
 								.groupby(sequence_map.set_index("sequence_ID").cell_line_name)\
 								.mean()\
-								.groupby(guide_gene_map.set_index("sgrna").gene, axis=1)\
-								.mean()
+								.T.groupby(guide_gene_map.set_index("sgrna").gene)\
+								.mean().T
 		mean_fold_change.replace(0, 1e-3, inplace=True)
 		denom = sequence_map.set_index("sequence_ID").loc[last_sequences].groupby("cell_line_name").days.max() - screen_delay
 		denom = denom.loc[mean_fold_change.index] * Chronos.default_timepoint_scale
@@ -2277,25 +2281,14 @@ guide abundance"
 				
 	def load(self, gene_effect, guide_efficacy, t0_offset, screen_delay, replicate_efficacy, 
 		library_effect):
-		# broken for now, will need to fix. Assumes replicate_efficacy is indexed by cell line name
 		'''
-		
+		Load a pretrained model. Designed to be called by `import_model`
 		'''
 		if self._pretrained != True:
 			raise RuntimeError("Model is built to train without existing data. \
 To load a pretrained model, you must reinitialize Chronos with `pretrained=True`")
 		
-		# convert cell_line_efficacy output into dictionary of cell lines to sets of library names
-		cells_to_libraries_screened = dict()
-		for cell_id in replicate_efficacy.index:
-			# only keep the libraries that are present in the newest data (self.keys)
-			cells_to_libraries_screened[cell_id] = set(
-				replicate_efficacy\
-				.loc[cell_id, ~replicate_efficacy.loc[cell_id, :].isna()]\
-				.index
-			).intersection(self.keys)
-		
-		missing = set(self.keys) - set.union(*[libs for libs in cells_to_libraries_screened.values()])
+		missing = set(self.keys) - set(library_effect.columns)
 		if len(missing):
 			raise ValueError(
 				"Data contains libraries that are not present in the pretrained model: %r. Please load a pretrained model \
@@ -2305,10 +2298,7 @@ your data" % missing
 		
 		mask = {}
 		for cell in self.all_cells:
-			if cell in cells_to_libraries_screened:
-				libraries = set([key for key in self.keys if cell in self.cells[key]]).union(cells_to_libraries_screened[cell])
-			else:
-				libraries = [key for key in self.keys if cell in self.cells[key]]
+			libraries = [key for key in self.keys if cell in self.cells[key]]
 			covered_genes = sorted(set.intersection(*[set(self.genes[key]) for key in libraries]))
 			mask[cell] = pd.Series(1, index=covered_genes, dtype=self.np_dtype)  
 		# mask must be constructed so cell lines not present in original data are not NAed
@@ -2420,23 +2410,31 @@ your data" % missing
 				relative pDNA abundance). 
 		'''
 		if os.path.isdir(directory) and not overwrite:
-			raise ValueError("Directory %r exists. To overwrite contents, pass `overwrite=True`" % directory)
+			raise IOError("Directory %r exists. To overwrite contents, pass `overwrite=True`" % directory)
 		elif not os.path.isdir(directory):
 			os.mkdir(directory)
 
 		write_hdf5(self.gene_effect, os.path.join(directory, "gene_effect.hdf5"))
 		pd.DataFrame({"efficacy": self.guide_efficacy}).to_csv(os.path.join(directory,  "guide_efficacy.csv"))
+		
 		efficacy = self.replicate_efficacy
-
 		stacked_efficacy = pd.concat([
 			pd.DataFrame({
 				"library": key, 
-				"replicate_effiacy": val
+				"replicate_efficacy": val
 			})
 			for key, val in efficacy.items()])
 		stacked_efficacy.to_csv(os.path.join(directory,  "replicate_efficacy.csv"))
 
-		pd.DataFrame(self.growth_rate).to_csv(os.path.join(directory,  "replicate_growth_rate.csv"))
+		growth_rate = self.growth_rate
+		stacked_growth_rate = pd.concat([
+			pd.DataFrame({
+				"library": key, 
+				"growth_rate": val
+			})
+			for key, val in growth_rate.items()])
+		stacked_growth_rate.to_csv(os.path.join(directory,  "growth_rate.csv"))
+
 		pd.DataFrame(self.excess_variance).to_csv(os.path.join(directory,  "screen_excess_variance.csv"))
 		pd.DataFrame({'screen_delay': self.screen_delay}).to_csv(os.path.join(directory,  "screen_delay.csv"))
 		self.library_effect.to_csv(os.path.join(directory,  "library_effect.csv"))
@@ -2594,14 +2592,17 @@ your data" % missing
 	def replicate_efficacy(self, desired_efficacy):
 		#default format saved in directory
 		if "library" in desired_efficacy:
-			desired_efficacy = dict(desired_efficacy.groupby("library"))
+			desired_efficacy = dict((library, eff["replicate_efficacy"]) 
+				for library, eff in desired_efficacy.groupby("library"))
 		for key in self.keys:
 			missing = set(self.replicate_index[key]) - set(desired_efficacy[key].index)
 			if len(missing) > 0:
 				raise ValueError("tried to assign cell efficacy for %s but missing %r" % (key, missing))
 			try:
 				self.sess.run(self.v_replicate_efficacy[key].assign(
-					Chronos.inverse_efficacy(desired_efficacy[key].loc[self.replicate_index[key]].fillna(1).values).reshape((-1, 1))
+					Chronos.inverse_efficacy(
+						desired_efficacy[key].loc[self.replicate_index[key]].fillna(1).values
+					).reshape((-1, 1))
 				))
 			except ValueError as e:
 				print(key)
@@ -2750,7 +2751,9 @@ your data" % missing
 	def growth_rate(self, desired_growth_rate):
 		#default format saved to directory
 		if "library" in desired_growth_rate:
-			desired_growth_rate = dict(desired_growth_rate.groupby("library"))
+			desired_growth_rate = dict([ (library, growth_rate["growth_rate"])
+				for library, growth_rate in desired_growth_rate.groupby("library")
+			])
 		for key in desired_growth_rate:
 			missing = set(self.replicate_index[key]) - set(desired_growth_rate[key].dropna().index)
 			if len(missing) > 0:
