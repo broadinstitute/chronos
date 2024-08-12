@@ -777,9 +777,7 @@ class Chronos(object):
 
 
 		sequence_map = Chronos._make_pdna_unique(sequence_map, readcounts)
-		for key, val in sequence_map.items():
-			if not "replicate_ID" in val:
-				Chronos._assign_replicate_IDs(val)
+		Chronos._assign_replicate_IDs(sequence_map)
 		if to_normalize_readcounts:
 			self.printer.print("normalizing readcounts")
 			readcounts = {key: normalize_readcounts(val, negative_control_sgrnas.get(key), sequence_map[key])
@@ -1068,6 +1066,8 @@ class Chronos(object):
 
 	def _assign_replicate_IDs(sequence_map):
 		for key, val in sequence_map.items():
+			if "replicate_ID" in val:
+				continue
 			if "replicate" in val and "condition" in val:
 				val["replicate_ID"] = val.apply(
 					lambda x: '%s__IN__%s_%s_%s' % (
