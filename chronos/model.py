@@ -827,7 +827,7 @@ class Chronos(object):
 		#Here, gather_index_outer is the array of integer indices that need to be selected from all_sequences to get
 		#the sequences in the sequence map for that library (in order). gather_index_inner is the array of integer indices 
 		#that need to be selected from all_cells to get the corresponding cell line for each sequence in that library.
-		#index_map is the string indices (sequence_IDs) corresponding to the given row in the library.
+		#sequence_index is the string indices (sequence_IDs) corresponding to the given row in the library.
 		#batch_map is similar to replicate_map, but maps pDNA batch rows to the corresponding late timepoints in each library.
 		(self.cells, self.replicates, self.all_sequences, self.all_replicates, \
 			self.all_cells, self.pDNA_unique, self.cell_indices, self.sequence_cell_line_map, 
@@ -1212,7 +1212,7 @@ class Chronos(object):
 		replicates = {key: val[val.cell_line_name != 'pDNA']['replicate_ID'].sort_values().unique() 
 			for key, val in sequence_map.items()
 		}
-		cells = {key: val[val.cell_line_name != 'pDNA']['cell_line_name'].unique() 
+		cells = {key: val[val.cell_line_name != 'pDNA']['cell_line_name'].sort_values().unique() 
 			for key, val in sequence_map.items()
 		}
 
@@ -1241,38 +1241,79 @@ and %i unique cell lines in %s" %(
 		# gather_index_outer gives the index of the replicate in all_sequences
 		sequence_cell_line_map = {key: 
 				Chronos.make_map(
-					sequence_map[key][['sequence_ID', 'cell_line_name']].set_index('sequence_ID').iloc[:, 0],
+						sequence_map[key]\
+						[['sequence_ID', 'cell_line_name']]\
+						.set_index('sequence_ID')\
+						.iloc[:, 0],
 				 	all_sequences, all_cells, self.np_dtype)
 				for key in self.keys}
 		sequence_index = {key: np.array(all_sequences)[sequence_cell_line_map[key]['gather_ind_outer']]
 								for key in self.keys}
 
 		self.printer.print('\nfinding replicate mappings indices')
+
 		sequence_replicate_map = {key: 
 				Chronos.make_map(
-					sequence_map[key][['sequence_ID', 'replicate_ID']].set_index('sequence_ID').iloc[:, 0],
-				 	all_sequences, replicates[key], self.np_dtype)
+					sequence_map[key]\
+						[['sequence_ID', 'replicate_ID']]\
+						.set_index('sequence_ID')\
+						.iloc[:, 0]\
+						.loc[sequence_index[key]],
+				 	all_sequences, list(replicates[key]), self.np_dtype)
 				for key in self.keys
 		}
+
 		replicate_cell_line_map =  {key: 
 				Chronos.make_map(
 					sequence_map[key]\
 						[['replicate_ID', "cell_line_name"]]\
 						.drop_duplicates()\
-						.set_index('replicate_ID')\
+						.set_index("replicate_ID")\
+						.loc[replicates[key]]\
 						.iloc[:, 0],
-				 	replicates[key], all_cells, self.np_dtype)
+				 	list(replicates[key]), all_cells, self.np_dtype)
 				for key in self.keys
 		}
 
 		replicate_index = {key: np.array(replicates[key])[replicate_cell_line_map[key]['gather_ind_outer']]
 								for key in self.keys}
+
+		cells_to_replicate = {
+			key: np.array(all_cells)[replicate_cell_line_map[key]['gather_ind_inner']]
+			for key in self.keys
+		}
+		cells_to_sequence = {
+			key: cells_to_replicate[key][sequence_replicate_map[key]['gather_ind_inner']]
+			for key in self.keys
+		}
+		for key in self.keys:
+			assert np.all(cells_to_sequence[key] == self.sequence_map[key]\
+				.set_index("sequence_ID")\
+				.loc[sequence_index[key], "cell_line_name"].values
+			), f'Index error in row maps for {key}. Either you have weird data types in your sequence map, \
+or there is a bug in Chronos. Please report at https://github.com/broadinstitute/chronos'
+
+		replicates_to_sequence = {
+			key: replicates[key][sequence_replicate_map[key]['gather_ind_inner']]
+			for key in self.keys
+		}
+		for key in self.keys:
+			assert np.all(replicates_to_sequence[key] == self.sequence_map[key]\
+				.set_index("sequence_ID")\
+				.loc[sequence_index[key], "replicate_ID"].values
+			), f'Index error in row maps in {key}. Either you have weird data types in your sequence map, \
+or there is a bug in Chronos. Please report at https://github.com/broadinstitute/chronos'
 		
 
 		self.printer.print('\nfinding late time point-pDNA mappings indices')
 		batch_map = {key: 
-				Chronos.make_map(sequence_map[key][['sequence_ID', 'pDNA_batch']].set_index('sequence_ID').iloc[:, 0],
-				 all_sequences, pDNA_unique[key], self.np_dtype)
+				Chronos.make_map(
+					sequence_map[key]\
+						[['sequence_ID', 'pDNA_batch']]\
+						.set_index('sequence_ID')\
+						.loc[sequence_index[key]]\
+						.iloc[:, 0],
+				 	all_sequences, pDNA_unique[key], self.np_dtype)
 				for key in self.keys}
 
 		return (cells, replicates, all_sequences, all_replicates, all_cells, pDNA_unique, cell_indices, 
@@ -2626,9 +2667,15 @@ your data" % missing
 		readcounts for each value estimated. Returns a per-library `dict` of `pandas.DataFrames`
 		indexed by sequence IDs (rows) and sgRNAs (columns)
 		'''
-		return {key: pd.DataFrame(self.sess.run(self._cost_presum[key], self.run_dict), 
-							  index=self.sequence_index[key], columns=self.column_map[key])
-				for key in self.keys}
+		masks = {key: self.sess.run(self._mask[key], self.run_dict) for key in self.keys}
+		arrs = {key: self.sess.run(self._cost_presum[key], self.run_dict) for key in self.keys}
+		out = {}
+		for key in self.keys:
+			arrs[key][masks[key] == 0] = np.nan
+			out[key] = pd.DataFrame(arrs[key], index=self.sequence_index[key], columns=self.column_map[key])
+			out[key].index.name = "sequence_ID"
+			out[key].columns.name = "sgRNA"
+		return out
 	
 
 	@property

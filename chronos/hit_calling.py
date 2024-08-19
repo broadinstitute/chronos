@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from statsmodels.stats.multitest import fdrcorrection
+from statsmodels.stats.multitest import fdrcorrection, multipletests
 from .model import Chronos, check_inputs
 from .reports import sum_collapse_dataframes
 from warnings import warn
@@ -179,7 +179,7 @@ def empirical_pvalue(observed, null, direction=-1):
 ################################################################
 
 
-def get_difference_significance(observed, null, tail):
+def get_difference_significance(observed, null, tail, method="FDR_TSBH"):
 	'''
 	Combines effect size, p-value, and FDR in one dataframe
 	'''
@@ -195,7 +195,7 @@ def get_difference_significance(observed, null, tail):
 	else:
 		raise ValueError("`tail` must be one of 'left', 'right', 'both'")
 
-	fdr = fdrcorrection(pvals, .05)[1]
+	fdr = multipletests(pvals, .05, method=method)[1]
 	return pd.DataFrame({"observed_statistic": observed, "pval": pvals, "FDR": fdr})
 
 
@@ -447,6 +447,7 @@ every map.")
 		allow_reversed_permutations=False,
 			max_null_iterations=2,
 			gene_readcount_total_bin_quantiles=[.05],
+			fdr_method="FDR_TSBH",
 				**kwargs):
 		'''
 		Generate a table with the significance of differences in gene effect between two conditions.
@@ -585,7 +586,7 @@ every map.")
 		for line, group in significance_groups:
 			group = group.dropna(subset="likelihood_pval")
 			fdrs.append(pd.DataFrame({
-				"likelihood_fdr": fdrcorrection(group["likelihood_pval"], .05)[1],
+				"likelihood_fdr": multipletests(group["likelihood_pval"], .05, method=fdr_method)[1],
 				"cell_line_name": line,
 				"gene": group.gene
 			}))
@@ -621,7 +622,7 @@ every map.")
 		)
 		undistinguished_model.train(**kwargs)
 		likelihood = cell_line_log_likelihood(undistinguished_model, nondistinguished_map)
-		del undistinguished_model
+		self.undistinguished_model = undistinguished_model
 		return likelihood
 
 
@@ -646,7 +647,7 @@ every map.")
 
 		distinguished_gene_effect = distinguished_model.gene_effect
 		distinguished_likelihood = cell_line_log_likelihood(distinguished_model, distinguished_map)
-		del distinguished_model
+		self.distinguished_model = distinguished_model
 
 		return distinguished_map, distinguished_likelihood, distinguished_gene_effect
 
@@ -1074,7 +1075,7 @@ def get_pvalue_dependent(gene_effect, negative_controls=None, negative_control_m
 	}).T
 
 
-def get_fdr_from_pvalues(pvalues):
+def get_fdr_from_pvalues(pvalues, method="FDR_TSBH"):
 	'''Computes the Benjamini-Hochberg corrected p-values (frequentist false discovery rates)
 	from the p-value matrix and returns it as a matrix. 
 	FDRs are computed within individual cell lines (rows).
@@ -1083,7 +1084,7 @@ def get_fdr_from_pvalues(pvalues):
 	for ind, row in pvalues.iterrows():
 		row = row.dropna()
 		out[ind] = pd.Series(
-			fdrcorrection(row, .05)[1],
+			multipletests(row, .05, method=method)[1],
 			index=row.index
 		)
 	return pd.DataFrame(out).reindex(index=pvalues.columns).T
