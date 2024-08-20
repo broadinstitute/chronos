@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from statsmodels.stats.multitest import fdrcorrection
+from statsmodels.stats.multitest import fdrcorrection, multipletests
 from .model import Chronos, check_inputs
 from .reports import sum_collapse_dataframes
 from warnings import warn
@@ -58,7 +58,7 @@ def cell_line_log_likelihood(model, distinguished_condition_map):
 	cost_presum = [
 		v\
 			.groupby(distinguished_condition_map[key].set_index("sequence_ID")['true_cell_line_name']).sum()\
-			.groupby(model.guide_gene_map[key].set_index("sgrna")["gene"], axis=1).sum()
+			.T.groupby(model.guide_gene_map[key].set_index("sgrna")["gene"]).sum().T
 
 		for key, v in cost_presum.items()
 	]
@@ -179,7 +179,7 @@ def empirical_pvalue(observed, null, direction=-1):
 ################################################################
 
 
-def get_difference_significance(observed, null, tail):
+def get_difference_significance(observed, null, tail, method="FDR_TSBH"):
 	'''
 	Combines effect size, p-value, and FDR in one dataframe
 	'''
@@ -195,7 +195,7 @@ def get_difference_significance(observed, null, tail):
 	else:
 		raise ValueError("`tail` must be one of 'left', 'right', 'both'")
 
-	fdr = fdrcorrection(pvals, .05)[1]
+	fdr = multipletests(pvals, .05, method=method)[1]
 	return pd.DataFrame({"observed_statistic": observed, "pval": pvals, "FDR": fdr})
 
 
@@ -266,6 +266,18 @@ in `condition_pair`: %r/n/n%r" % (condition_pair, condition_map))
 	return out[out.sequence_ID.isin(retain_sequences)].copy()
 
 
+def assign_condition_replicate_ID(condition_map):
+	'''
+	Create a condition replicate ID.
+	'''
+	condition_map["replicate_ID"] = condition_map.apply(
+					lambda x: '%s__IN__%s_%s_%s' % (
+						x["cell_line_name"], x["condition"], x["replicate"], x['pDNA_batch']
+					),
+					axis=1
+				)
+
+
 def create_condition_sequence_map(condition_map, condition_pair=None):
 	'''
 	Returns a new map filtered for `condition` in `condition_pair` with cell lines having fewer
@@ -301,7 +313,7 @@ def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reve
 the 'condition' column of `condition_map` must have exactly two unique values for non-pDNA entries.")
 
 	#drop days column for identifying possible permutations
-	base = seq_map[["cell_line_name", "condition", "replicate", "pDNA_batch"]].drop_duplicates()
+	base = seq_map[["cell_line_name", "condition", "replicate_ID", "pDNA_batch"]].drop_duplicates()
 	
 	splits = base.groupby('cell_line_name')
 	stack = {}
@@ -386,7 +398,7 @@ class ConditionComparison():
 			`readcounts` (`dict` of `pandas.DataFrame`): readcount matrices from the experiment.
 					See `model.Chronos`
 			`condition_map` (`dict` of `pandas.DataFrame`): Tables in the same format as `sequence_map`
-					for `model.Chronos`, but with the additional columns `replicate` (e.g. A, B), and 
+					for `model.Chronos`, but now requires `replicate` (e.g. A, B), and 
 					`condition`, which the comparator will compare results between. `condition` can be 
 					any value that can be passed to `str`.
 					Results will be reported separately per cell line.
@@ -398,8 +410,11 @@ class ConditionComparison():
 		check_condition_map(condition_map)
 		check_inputs(readcounts, guide_gene_map, condition_map)
 		self.readcounts = readcounts
-		self.condition_map = condition_map
+		self.condition_map = Chronos._make_pdna_unique(condition_map, readcounts)
+		for key, val in self.condition_map.items():
+			assign_condition_replicate_ID(val)
 		self.guide_gene_map = guide_gene_map
+
 		self.print_to = print_to
 		self.kwargs = kwargs
 		self.keys = sorted(self.readcounts.keys())
@@ -432,6 +447,7 @@ every map.")
 		allow_reversed_permutations=False,
 			max_null_iterations=2,
 			gene_readcount_total_bin_quantiles=[.05],
+			fdr_method="FDR_TSBH",
 				**kwargs):
 		'''
 		Generate a table with the significance of differences in gene effect between two conditions.
@@ -570,7 +586,7 @@ every map.")
 		for line, group in significance_groups:
 			group = group.dropna(subset="likelihood_pval")
 			fdrs.append(pd.DataFrame({
-				"likelihood_fdr": fdrcorrection(group["likelihood_pval"], .05)[1],
+				"likelihood_fdr": multipletests(group["likelihood_pval"], .05, method=fdr_method)[1],
 				"cell_line_name": line,
 				"gene": group.gene
 			}))
@@ -587,8 +603,8 @@ every map.")
 		readcount_gene_totals = sum_collapse_dataframes([
 			retained_readcounts[key]\
 						.drop(pdna_seqs[key], axis=0, errors="ignore")\
-						.groupby(guide_gene_map[key].set_index("sgrna")["gene"], axis=1)\
-						.sum()\
+						.T.groupby(guide_gene_map[key].set_index("sgrna")["gene"])\
+						.sum().T\
 						.median(axis=0)
 			for key in self.keys
 		])
@@ -606,7 +622,7 @@ every map.")
 		)
 		undistinguished_model.train(**kwargs)
 		likelihood = cell_line_log_likelihood(undistinguished_model, nondistinguished_map)
-		del undistinguished_model
+		self.undistinguished_model = undistinguished_model
 		return likelihood
 
 
@@ -631,7 +647,7 @@ every map.")
 
 		distinguished_gene_effect = distinguished_model.gene_effect
 		distinguished_likelihood = cell_line_log_likelihood(distinguished_model, distinguished_map)
-		del distinguished_model
+		self.distinguished_model = distinguished_model
 
 		return distinguished_map, distinguished_likelihood, distinguished_gene_effect
 
@@ -1059,7 +1075,7 @@ def get_pvalue_dependent(gene_effect, negative_controls=None, negative_control_m
 	}).T
 
 
-def get_fdr_from_pvalues(pvalues):
+def get_fdr_from_pvalues(pvalues, method="FDR_TSBH"):
 	'''Computes the Benjamini-Hochberg corrected p-values (frequentist false discovery rates)
 	from the p-value matrix and returns it as a matrix. 
 	FDRs are computed within individual cell lines (rows).
@@ -1068,7 +1084,7 @@ def get_fdr_from_pvalues(pvalues):
 	for ind, row in pvalues.iterrows():
 		row = row.dropna()
 		out[ind] = pd.Series(
-			fdrcorrection(row, .05)[1],
+			multipletests(row, .05, method=method)[1],
 			index=row.index
 		)
 	return pd.DataFrame(out).reindex(index=pvalues.columns).T
