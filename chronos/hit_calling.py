@@ -701,9 +701,13 @@ every map.")
 		):
 
 		bins = readcount_gene_totals.quantile([0] + list(gene_readcount_total_bin_quantiles) + [1])
-		bins[0] = 0
+		bins[0.0] = -1
 		bins[1.0] *= 1.05
 		bins = pd.cut(readcount_gene_totals, bins)
+		try:
+			_ = sorted(bins.unique())
+		except:
+			raise ValueError("readcounts improperly binned, bins: %r" % bins.unique())
 
 		out = []
 		bin_assignments = []
@@ -711,6 +715,7 @@ every map.")
 		for line in compared_lines:
 			if line == 'pDNA':
 				continue
+
 
 			for bin in sorted(bins.unique()):
 				genes = bins.loc[lambda x: x==bin].index
