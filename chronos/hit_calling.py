@@ -38,7 +38,7 @@ def fit_weighted_lognorm(x, keep_points=20):
     return linear.intercept_, linear.coef_[0]
 
 
-def lognorm_likelihood_p(x, intercept, s):
+def lognorm_likelihood_p(x, intercept, s, direction=-1):
 	'''
 	find the right-tailed p-values for `x` using a lognormal distribution
 	to model `x` under the null hypothesis.
@@ -48,6 +48,10 @@ def lognorm_likelihood_p(x, intercept, s):
 		`s`: the parameter of the lognormal distribution
 	'''
 	p = pd.Series(1-norm(scale=s, loc=intercept).cdf(np.log(x.clip(1e-4, np.inf))), index=x.index)
+	if direction == -1:
+		p = 1 - p
+	elif direction != 1:
+		raise ValueError("direction must be one of -1, 1")
 	return p
 
 
@@ -172,6 +176,30 @@ def empirical_pvalue(observed, null, direction=-1):
 	if isinstance(observed, pd.Series):
 		pvals = pd.Series(pvals, index=observed.index)
 	return pvals
+
+
+def empirical_pvalue_lognorm_extension(observed, null, direction=-1):
+	'''
+	computed an empirical p-value, then a lognorm likelihood p. For values in `observed` more extreme than any value in 
+	`null`, the lognorm likelihood p-value is substituted.
+	Parameters:
+		`observed` (1D array-like): observed values for the samples
+		`null` (1D array-like): values sampled from the null hypothesis
+		`direction` (-1 or 1), which tail is being tested. -1 tests the hyothesis that 
+		the observed values are less positive than would be expected by chance
+	Returns:
+		numpy.ndarray or pandas.Series of pvalues
+	'''
+
+	p = empirical_pvalue(observed, null, direction)
+	# use the lognormal model for the null to extend p-values beyond most extreme null value
+	intercept, s = fit_weighted_lognorm(null)
+	p2 = lognorm_likelihood_p(observed, intercept, s, direction)
+	if direction == 1:
+		p.mask(observed > null.max(), p2, inplace=True)
+	else:
+		p.mask(observed < null.min(), p2, inplace=True)
+	return p
 
 
 ################################################################
@@ -464,6 +492,7 @@ every map.")
 		Parameters:
 			`condition_pair` (iteranble of len 2 or None): the two conditions to be compared. If None,
 				requires that `self.condition_map` have only two uniue conditions for non-pDNA entries.
+				Differences will be reported as the second condition minus the first.
 			`gene_readcount_total_bin_quantiles`: gene effect estimates for genes informed by few total reads are
 				noisier than those with abundant reads. Therefore, when calculating p-values, genes
 				will be binned by total readcounts according to the quantiles passed here. 0 and 1 are assumed.
@@ -541,29 +570,20 @@ every map.")
 			**kwargs
 		)
 
-
-		gene_effect_in_alt = distinguished_gene_effect.loc[[
-			'%s__in__%s' % (line, condition_pair[1])
-			for line in self.compared_lines
-		]]
-		gene_effect_in_alt.set_index(np.array(self.compared_lines), inplace=True)
-
-		gene_effect_in_baseline = distinguished_gene_effect.loc[[
-			'%s__in__%s' % (line, condition_pair[0])
-			for line in self.compared_lines
-		]]
-		gene_effect_in_baseline.set_index(np.array(self.compared_lines), inplace=True)
-
-		gene_effect_difference = gene_effect_in_alt - gene_effect_in_baseline
+		gene_effect_in_alt, gene_effect_in_baseline, gene_effect_difference = self.get_gene_effect_difference(
+			distinguished_gene_effect, condition_pair
+		)
 
 
 		gene_effect_annotations = {
 			"gene_effect_in_%s" % condition_pair[0]: gene_effect_in_baseline.stack(),
 			"gene_effect_in_%s" % condition_pair[1]: gene_effect_in_alt.stack(),
 			"gene_effect_difference": gene_effect_difference.stack(),
-
-			
 		}
+		for i, permuted_effect in enumerate(permuted_gene_effects):
+			ge_alt, ge_baseline, ge_diff = self.get_gene_effect_difference(permuted_effect, condition_pair)
+			gene_effect_annotations["gene_effect_difference_permutation_%i" % i] = ge_diff.stack()
+
 		gene_effect_annotations = pd.DataFrame(gene_effect_annotations).reset_index()
 		gene_effect_annotations.rename(columns={
 			gene_effect_annotations.columns[0]: "cell_line_name",
@@ -689,6 +709,24 @@ every map.")
 		return permuted_maps, out, permuted_gene_effects
 
 
+	def get_gene_effect_difference(self, distinguished_gene_effect, condition_pair):
+		gene_effect_in_alt = distinguished_gene_effect.loc[[
+			'%s__in__%s' % (line, condition_pair[1])
+			for line in self.compared_lines
+		]]
+		gene_effect_in_alt.set_index(np.array(self.compared_lines), inplace=True)
+
+		gene_effect_in_baseline = distinguished_gene_effect.loc[[
+			'%s__in__%s' % (line, condition_pair[0])
+			for line in self.compared_lines
+		]]
+		gene_effect_in_baseline.set_index(np.array(self.compared_lines), inplace=True)
+
+		gene_effect_difference = gene_effect_in_alt - gene_effect_in_baseline
+
+		return gene_effect_in_alt, gene_effect_in_baseline, gene_effect_difference
+
+
 	def get_significance(self, 
 			gene_readcount_total_bin_quantiles, 
 			readcount_gene_totals,
@@ -729,11 +767,7 @@ every map.")
 					for v in permuted_likelihoods], ignore_index=True)
 				observed = distinguished_likelihood.loc[line, genes] - undistinguished_likelihood.loc[line, genes]
 
-				p = empirical_pvalue(observed, null, direction=1)
-				# use the lognormal model for the null to extend p-values beyond most extreme null value
-				intercept, s = fit_weighted_lognorm(null)
-				p2 = lognorm_likelihood_p(observed, intercept, s)
-				p.mask(observed > null.max(), p2, inplace=True)
+				p = empirical_pvalue_lognorm_extension(observed, null, direction=1)
 
 				out.append(pd.DataFrame({
 					"likelihood": distinguished_likelihood.loc[line, genes],
@@ -756,6 +790,51 @@ every map.")
 				out[-1].reset_index(inplace=True)
 				out[-1].rename(columns={out[-1].columns[0]: "gene"})
 		return pd.concat(out, ignore_index=True)
+
+
+def get_consensus_difference_statistics(comparison_statistics):
+    cs = comparison_statistics.copy()
+    cs["likelihood_difference"] = cs["likelihood"] - cs["likelihood_undistinguished"]
+    n_perms = len([s for s in cs.columns if s.startswith("likelihood_permutation")])
+    for i in range(n_perms):
+        cs["likelihood_difference_permutation_%i"%i] = cs["likelihood_permutation_%i" %i] - cs["likelihood_undistinguished"]
+    
+    def get_adjusted_likelihood(ge_diff_col, ll_diff_col):
+        means = cs.groupby("gene")[ge_diff_col].mean()
+        adjusted_ll_diffs = []
+        for line, group in cs.groupby("cell_line_name"):
+            adjusted_ll_diff = group[ll_diff_col].copy()
+            mean_sign = np.sign(means.loc[group.gene].values)
+            adjusted_ll_diff[mean_sign != np.sign(group[ge_diff_col])] = -np.abs(adjusted_ll_diff[mean_sign != np.sign(group[ge_diff_col])])
+            adjusted_ll_diffs.append(adjusted_ll_diff)
+        return pd.concat(adjusted_ll_diffs), means
+    
+    means = {}
+    cs["adjusted_likelihood_difference"], means["mean_gene_effect_difference"] = get_adjusted_likelihood(
+        "gene_effect_difference", 
+        "likelihood_difference"
+    )
+    for i in range(n_perms):
+        (
+            cs["adjusted_likelihood_difference_permutation_%i" % i],
+            means["mean_gene_effect_difference_permutation_%i" %i]) = get_adjusted_likelihood(
+            "gene_effect_difference_permutation_%i" % i, 
+            "likelihood_difference_permutation_%i" %i
+        )
+    
+    likelihood_totals = cs\
+        .groupby("gene")\
+        [["adjusted_likelihood_difference"] + ["adjusted_likelihood_difference_permutation_%i" % i for i in range(n_perms)]]\
+        .sum()
+    null = pd.concat([likelihood_totals["adjusted_likelihood_difference_permutation_%i" %i] for i in range(n_perms)],
+                     ignore_index=True)
+    pvals = empirical_pvalue_lognorm_extension(likelihood_totals["adjusted_likelihood_difference"], null, direction=1)
+    means["likelihood_pval"] = pvals
+    mask = pvals.notnull()
+    fdr = pd.Series(multipletests(pvals[mask].values, .05, method="FDR_TSBH")[1], index=pvals.index[mask])
+    means["likelihood_fdr"] = fdr
+    means = pd.concat([pd.DataFrame(means), likelihood_totals], axis=1)
+    return means
 
 
 ################################################################
