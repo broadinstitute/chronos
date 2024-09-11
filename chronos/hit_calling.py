@@ -13,29 +13,29 @@ from sympy.utilities.iterables import multiset_permutations
 
 
 def fit_weighted_lognorm(x, keep_points=20):
-    '''fit a lognormal distribution to `pandas.Series` `x` using auxiliary linear regression 
-    on the inverse normal cumulative density function vs log(`x`). `x` is clipped to be positive
-    and the regression is weighted by the value of `x` so the fit focuses heavily on matching
-    the right tail.
-    Returns:
-        `intercept`, `s`: the intercept and coefficient from the auxiliary linear regression.
-    '''
-    x = x.sort_values()
-    logged = np.log(x.clip(1e-4, np.inf)).sort_values().dropna()
-    
-    grid = np.linspace(1/len(logged), 1-1/len(logged), len(logged))[-keep_points:]
-    logged = logged[-keep_points:]
-    idf = norm.ppf(grid)
-    
-    weight = x.clip(0, np.inf)[-keep_points:]
-    weight /= weight.sum()
-    
-    
-    linear = LinearRegression()
-    linear.fit(X=idf[:, np.newaxis], y=logged.values, sample_weight=weight)
-    if pd.isnull(linear.coef_[0]) or pd.isnull(linear.intercept_):
-        raise ValueError("Linear regression failed to fit logged values to gaussian inverse CDF with `x`=%r" % (x, ))
-    return linear.intercept_, linear.coef_[0]
+	'''fit a lognormal distribution to `pandas.Series` `x` using auxiliary linear regression 
+	on the inverse normal cumulative density function vs log(`x`). `x` is clipped to be positive
+	and the regression is weighted by the value of `x` so the fit focuses heavily on matching
+	the right tail.
+	Returns:
+		`intercept`, `s`: the intercept and coefficient from the auxiliary linear regression.
+	'''
+	x = x.sort_values()
+	logged = np.log(x.clip(1e-4, np.inf)).sort_values().dropna()
+	
+	grid = np.linspace(1/len(logged), 1-1/len(logged), len(logged))[-keep_points:]
+	logged = logged[-keep_points:]
+	idf = norm.ppf(grid)
+	
+	weight = x.clip(0, np.inf)[-keep_points:]
+	weight /= weight.sum()
+	
+	
+	linear = LinearRegression()
+	linear.fit(X=idf[:, np.newaxis], y=logged.values, sample_weight=weight)
+	if pd.isnull(linear.coef_[0]) or pd.isnull(linear.intercept_):
+		raise ValueError("Linear regression failed to fit logged values to gaussian inverse CDF with `x`=%r" % (x, ))
+	return linear.intercept_, linear.coef_[0]
 
 
 def lognorm_likelihood_p(x, intercept, s, direction=-1):
@@ -793,48 +793,102 @@ every map.")
 
 
 def get_consensus_difference_statistics(comparison_statistics):
-    cs = comparison_statistics.copy()
-    cs["likelihood_difference"] = cs["likelihood"] - cs["likelihood_undistinguished"]
-    n_perms = len([s for s in cs.columns if s.startswith("likelihood_permutation")])
-    for i in range(n_perms):
-        cs["likelihood_difference_permutation_%i"%i] = cs["likelihood_permutation_%i" %i] - cs["likelihood_undistinguished"]
-    
-    def get_adjusted_likelihood(ge_diff_col, ll_diff_col):
-        means = cs.groupby("gene")[ge_diff_col].mean()
-        adjusted_ll_diffs = []
-        for line, group in cs.groupby("cell_line_name"):
-            adjusted_ll_diff = group[ll_diff_col].copy()
-            mean_sign = np.sign(means.loc[group.gene].values)
-            adjusted_ll_diff[mean_sign != np.sign(group[ge_diff_col])] = -np.abs(adjusted_ll_diff[mean_sign != np.sign(group[ge_diff_col])])
-            adjusted_ll_diffs.append(adjusted_ll_diff)
-        return pd.concat(adjusted_ll_diffs), means
-    
-    means = {}
-    cs["adjusted_likelihood_difference"], means["mean_gene_effect_difference"] = get_adjusted_likelihood(
-        "gene_effect_difference", 
-        "likelihood_difference"
-    )
-    for i in range(n_perms):
-        (
-            cs["adjusted_likelihood_difference_permutation_%i" % i],
-            means["mean_gene_effect_difference_permutation_%i" %i]) = get_adjusted_likelihood(
-            "gene_effect_difference_permutation_%i" % i, 
-            "likelihood_difference_permutation_%i" %i
-        )
-    
-    likelihood_totals = cs\
-        .groupby("gene")\
-        [["adjusted_likelihood_difference"] + ["adjusted_likelihood_difference_permutation_%i" % i for i in range(n_perms)]]\
-        .sum()
-    null = pd.concat([likelihood_totals["adjusted_likelihood_difference_permutation_%i" %i] for i in range(n_perms)],
-                     ignore_index=True)
-    pvals = empirical_pvalue_lognorm_extension(likelihood_totals["adjusted_likelihood_difference"], null, direction=1)
-    means["likelihood_pval"] = pvals
-    mask = pvals.notnull()
-    fdr = pd.Series(multipletests(pvals[mask].values, .05, method="FDR_TSBH")[1], index=pvals.index[mask])
-    means["likelihood_fdr"] = fdr
-    means = pd.concat([pd.DataFrame(means), likelihood_totals], axis=1)
-    return means
+	cs = comparison_statistics.copy()
+	cs["likelihood_difference"] = cs["likelihood"] - cs["likelihood_undistinguished"]
+	n_perms = len([s for s in cs.columns if s.startswith("likelihood_permutation")])
+	for i in range(n_perms):
+		cs["likelihood_difference_permutation_%i"%i] = cs["likelihood_permutation_%i" %i] - cs["likelihood_undistinguished"]
+
+	def get_likelihood_of_median(ge_diff_col, ll_diff_col):
+		ge_diff = pd.pivot(
+			cs, 
+			values=ge_diff_col, 
+			index="cell_line_name", 
+			columns="gene"
+		).fillna(0)
+		rank = ge_diff.rank(axis=0)
+		if len(ge_diff)%2:
+			#odd number of lines, take the median cell line
+			mask = rank != int((len(ge_diff) + 1)/2)
+		else:
+			#even number, take the two closest to the median
+			mask = (rank != int(len(ge_diff)/2)) & (rank != int(len(ge_diff)/2) + 1)
+
+		likelihood_pivot = pd.pivot(
+			cs, 
+			values=ll_diff_col, 
+			index="cell_line_name", 
+			columns="gene"
+		)
+		likelihood_of_med = likelihood_pivot.mask(mask).mean()
+		ge_med = ge_diff.mask(mask).mean()
+		assert (ge_med == ge_diff.median()).all(), "bug in mask"
+		return likelihood_of_med, ge_med
+
+
+	out = {}
+	out["likelihood_diff_of_median_line"], out["gene_effect_diff_median"] = get_likelihood_of_median(
+		"gene_effect_difference", 
+		"likelihood_difference"
+	)
+	for i in range(n_perms):
+		(
+			out["likelihood_diff_of_median_line_permutation_%i" %i],
+			out["gene_effect_diff_median_permutation_%i" % i]
+		) = get_likelihood_of_median(
+			"gene_effect_difference_permutation_%i" %i, 
+			"likelihood_difference_permutation_%i" % i
+		)
+	null = pd.concat([out["likelihood_diff_of_median_line_permutation_%i" %i] for i in range(n_perms)],
+					 ignore_index=True)
+	pvals = empirical_pvalue_lognorm_extension(
+		out["likelihood_diff_of_median_line"], 
+		null, 
+		direction=1
+	)
+	mask = pvals.notnull()
+	fdr = pd.Series(multipletests(pvals[mask].values, .05, method="FDR_TSBH")[1], index=pvals.index[mask])
+	out["p_in_median_line"] = pvals
+	out["fdr_in_median_line"] = fdr
+	return pd.DataFrame(out)
+	
+	# def get_adjusted_likelihood(ge_diff_col, ll_diff_col):
+	# 	means = cs.groupby("gene")[ge_diff_col].mean()
+	# 	adjusted_ll_diffs = []
+	# 	for line, group in cs.groupby("cell_line_name"):
+	# 		adjusted_ll_diff = group[ll_diff_col].copy()
+	# 		mean_sign = np.sign(means.loc[group.gene].values)
+	# 		adjusted_ll_diff[mean_sign != np.sign(group[ge_diff_col])] = -np.abs(adjusted_ll_diff[mean_sign != np.sign(group[ge_diff_col])])
+	# 		adjusted_ll_diffs.append(adjusted_ll_diff)
+	# 	return pd.concat(adjusted_ll_diffs), means
+	
+	# means = {}
+	# cs["adjusted_likelihood_difference"], means["mean_gene_effect_difference"] = get_likelihood_of_median(
+	# 	"gene_effect_difference", 
+	# 	"likelihood_difference"
+	# )
+	# for i in range(n_perms):
+	# 	(
+	# 		cs["adjusted_likelihood_difference_permutation_%i" % i],
+	# 		means["mean_gene_effect_difference_permutation_%i" %i]) = get_likelihood_of_median(
+	# 		"gene_effect_difference_permutation_%i" % i, 
+	# 		"likelihood_difference_permutation_%i" %i
+	# 	)
+	
+	# likelihood_totals = cs\
+	# 	.groupby("gene")\
+	# 	[["adjusted_likelihood_difference"] + ["adjusted_likelihood_difference_permutation_%i" % i for i in range(n_perms)]]\
+	# 	.sum()
+
+	# null = pd.concat([likelihood_totals["adjusted_likelihood_difference_permutation_%i" %i] for i in range(n_perms)],
+	# 				 ignore_index=True)
+	# pvals = empirical_pvalue_lognorm_extension(likelihood_totals["adjusted_likelihood_difference"], null, direction=1)
+	# means["likelihood_pval"] = pvals
+	# mask = pvals.notnull()
+	# fdr = pd.Series(multipletests(pvals[mask].values, .05, method="FDR_TSBH")[1], index=pvals.index[mask])
+	# means["likelihood_fdr"] = fdr
+	# means = pd.concat([pd.DataFrame(means), likelihood_totals], axis=1)
+	# return means
 
 
 ################################################################
