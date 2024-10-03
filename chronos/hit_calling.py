@@ -876,6 +876,7 @@ class MixFitEmpirical:
 			density `density[n](data[k])`
 		`q`	(`numpy.ndarray` of `float` in [0, 1], shape = (n, k)): the posterior probability that
 			a point in `data` belongs to a distribution. 
+		`likelihood` (`float`): The mean log likelhood of the `data` given `p` and `q`.
 	'''
 	def __init__(self, densities, data, initial_lambdas=None):
 		'''
@@ -897,6 +898,7 @@ class MixFitEmpirical:
 		assert sum(initial_lambdas) == 1, 'Invalid mixing sizes'
 		self.q = 1.0/(len(self.densities)) * np.ones((len(self.densities), len(self.data)))
 		self.p = np.stack([d(self.data) for d in densities])
+		self.likelihood = self.get_likelihood()
 
 	
 	def fit(self, tol=1e-7, maxit=1000, lambda_lock=False):
@@ -910,7 +912,6 @@ class MixFitEmpirical:
 				of the observations estimated to be generated from each of the distributions.
 				if `False`, will use the `initial_lambdas`. 
 		'''
-		self.likelihood = self.get_likelihood()
 		for i in range(maxit):
 
 			#E step
@@ -940,7 +941,7 @@ class MixFitEmpirical:
 				maxit, self.likelihood, last_change))
 		
 	def get_likelihood(self):
-
+		'''get the mean log likelihood of `self.data` given current posterior `self.q`.'''
 		out = np.mean(
 			np.log(
 				np.sum(
@@ -996,7 +997,7 @@ def probability_2class(component0_points, component1_points, all_points,
 			   smoothing='scott', p_smoothing=.15,
 			   right_kernel_threshold=1, left_kernel_threshold=-3,
 			   maxit=500, lambda_lock=False, mixfit_kwargs={}, 
-			   kernel_kwargs=dict(lower_bound=-1.5, lower_value=1, upper_bound=.25, upper_value=0)):
+			   kernel_kwargs=dict(lower_bound=-2, lower_value=1, upper_bound=.5, upper_value=0)):
 	'''
 	Estimates the distributions of component0_points and component1_points using a gaussian 
 	kernel, then assigns each of all_points a probability of belonging to the component 
@@ -1007,29 +1008,29 @@ def probability_2class(component0_points, component1_points, all_points,
 			gaussian_kde(component0_points, bw_method=smoothing),
 			gaussian_kde(component1_points, bw_method=smoothing)
 		]
-	points = np.arange(min(all_points) - 4*p_smoothing, max(all_points) + 4*p_smoothing, .01)
-	estimates = [e(points) for e in estimates]
+	grid = np.arange(min(all_points) - 4*p_smoothing, max(all_points) + 4*p_smoothing, .01)
+	estimates = [e(grid) for e in estimates]
 	
 	#this step copes with the fact that scipy's gaussian KDE often decays to true 0 in the far tails, leading to
 	#undefined behavior in the mixture model
 	if right_kernel_threshold is not None:
-		estimates[0][np.logical_and(points > right_kernel_threshold, estimates[0] <1e-16)] = 1e-16
+		estimates[0][np.logical_and(grid > right_kernel_threshold, estimates[0] <1e-16)] = 1e-16
 	if left_kernel_threshold is not None:
-		estimates[1][np.logical_and(points < left_kernel_threshold, estimates[1] <1e-16)] = 1e-16
+		estimates[1][np.logical_and(grid < left_kernel_threshold, estimates[1] <1e-16)] = 1e-16
 
-	#create density functions using interpolation (these are faster than calling KDE on points)
-	densities = [interp1d(points, e) for e in estimates]
+	#create density functions using interpolation (these are faster than calling KDE on grid)
+	densities = [interp1d(grid, e) for e in estimates]
 	
 	#infer probabilities
 	fitter = MixFitEmpirical(densities, all_points, **mixfit_kwargs)
 	fitter.fit(maxit=maxit, lambda_lock=lambda_lock)
 
 	#generate smoothed probability function
-	p = fitter.component_probability(points, 1)
+	grid_p = fitter.component_probability(grid, 1)
 	probability_kernel = TailKernel(**kernel_kwargs)
-	probability_kernel.apply(points, p)
-	p = smooth(p, int(100*p_smoothing))
-	d = interp1d(points, p)
+	probability_kernel.apply(grid, grid_p)
+	grid_p = smooth(grid_p, int(100*p_smoothing))
+	d = interp1d(grid, grid_p)
 
 	#return probabilities
 	out = d(all_points)
