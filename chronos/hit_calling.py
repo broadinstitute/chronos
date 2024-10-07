@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from statsmodels.stats.multitest import fdrcorrection, multipletests
+import statsmodels.api as sm
 from .model import Chronos, check_inputs
 from .reports import sum_collapse_dataframes
 from warnings import warn
@@ -10,6 +11,12 @@ from scipy.interpolate import interp1d
 from scipy.signal import argrelextrema
 from sklearn.linear_model import LinearRegression
 from sympy.utilities.iterables import multiset_permutations
+try:
+	from tqdm import tqdm
+except ImportError:
+	def tqdm(x, *args, **kwargs):
+		return x
+
 
 
 def fit_weighted_lognorm(x, keep_points=20):
@@ -852,15 +859,6 @@ def get_consensus_difference_statistics(comparison_statistics):
 ################################################################
 
 
-def smooth(x, sigma):
-	'''smooth with a gaussian kernel'''
-
-
-	kernel = np.exp(-.5 * np.arange(int(-4 * sigma), int(4 * sigma + 1), 1) ** 2 / sigma ** 2)
-	kernel = kernel / sum(kernel)
-	return np.convolve(x, kernel, 'same')
-
-
 ### Infer class probabilities
 class MixFitEmpirical:
 	'''
@@ -901,7 +899,7 @@ class MixFitEmpirical:
 		self.likelihood = self.get_likelihood()
 
 	
-	def fit(self, tol=1e-7, maxit=1000, lambda_lock=False):
+	def fit(self, tol=1e-7, maxit=1000, lambda_lock=False, verbose=False):
 		'''
 		Maximize likelihood. 
 		Parameters:
@@ -934,9 +932,10 @@ class MixFitEmpirical:
 			last_change = (new_likelihood - self.likelihood)/self.likelihood
 			self.likelihood = new_likelihood
 			if 0 <= last_change < tol:
-				print("Converged at likelihood %f with %i iterations" %(new_likelihood, i))
+				if verbose:
+					print("Converged at likelihood %f with %i iterations" %(new_likelihood, i))
 				break
-		if i >= maxit - 1:
+		if (i >= maxit - 1) and verbose:
 			print("Reached max iterations %i with likelihood %f, last change %f" %(
 				maxit, self.likelihood, last_change))
 		
@@ -972,43 +971,44 @@ class MixFitEmpirical:
 		return self.lambdas[component] * self.densities[component](points) / sum([
 			l*d(points) for l, d in zip(self.lambdas, self.densities)
 			])
-
-
-class TailKernel:
-	'''Used to set points at left and right extremes to fixed values'''
-	def __init__(self,
-				lower_bound=None, lower_value=None, upper_bound=None, upper_value=None):
-		self.lower_bound = lower_bound
-		self.lower_value = lower_value
-		self.upper_bound = upper_bound
-		self.upper_value = upper_value
-
-	def apply(self, x, y):
-		if self.lower_bound is not None:
-			y[x < self.lower_bound] = self.lower_value
-		if self.upper_bound is not None:
-			y[x > self.upper_bound] =self.upper_value
-
-
-
-				
+			
 
 def probability_2class(component0_points, component1_points, all_points,
-			   smoothing='scott', p_smoothing=.15,
+			   smoothing='scott',
 			   right_kernel_threshold=1, left_kernel_threshold=-3,
-			   maxit=500, lambda_lock=False, mixfit_kwargs={}, 
-			   kernel_kwargs=dict(lower_bound=-2, lower_value=1, upper_bound=.5, upper_value=0)):
+			   maxit=500, lambda_lock=False, verbose=False, **mixfit_kwargs, 
+			   ):
 	'''
 	Estimates the distributions of component0_points and component1_points using a gaussian 
-	kernel, then assigns each of all_points a probability of belonging to the component 
-	distribution. Note that this is NOT a p-value: P(component1) = 1 - P(component0)
+	kernel, then assigns each of all_points a probability of belonging to the component1 
+	distribution, assuming that the probability is a logit function of the value.
+	Note that this is NOT a p-value: P(component1) = 1 - P(component0). 
+	Component1 is always assumed to have more negative values than component0. 
+	Parameters:
+		component0_points (1D iterable): a set of values sampled from component0
+		component1_points (1D iterable): a set of values sampled from component1
+		all_points (`pandas.Series`): the values to be assigned probabilities
+		smoothing (default "scott"): argument passed to `scipy.stats.guassian_kde` for 
+			`bw_method`
+		right_kernel_threshold (`float`): the value above which component0 will always have
+			a small, finite density
+		left_kernel_threshold (`float`): the value below which component1 will always have a 
+			small, finite density
+		maxit (`int`): maximum iterations to allow when calling `MixFitEmperical.fit`.
+		lambda_lock (`bool`): whether to lock the estimated fraction of all points coming
+			from component1 to the initial guess (50%, unless `lambda` is passed)
+		verbose (`bool`): whether to print statements from `MixFitEmpirical.fit`
+		Additional keyword args are passed to the `MixFitEmpirical` constructor.
+	Returns:
+		1D `numpy.ndarray` of the posterior probability of being generated from component1 vs 
+			component0 for each point in all_points.
 	'''
 	#estimate density
 	estimates = [
 			gaussian_kde(component0_points, bw_method=smoothing),
 			gaussian_kde(component1_points, bw_method=smoothing)
 		]
-	grid = np.arange(min(all_points) - 4*p_smoothing, max(all_points) + 4*p_smoothing, .01)
+	grid = np.arange(min(all_points) - .02, max(all_points) + .02, .01)
 	estimates = [e(grid) for e in estimates]
 	
 	#this step copes with the fact that scipy's gaussian KDE often decays to true 0 in the far tails, leading to
@@ -1023,20 +1023,18 @@ def probability_2class(component0_points, component1_points, all_points,
 	
 	#infer probabilities
 	fitter = MixFitEmpirical(densities, all_points, **mixfit_kwargs)
-	fitter.fit(maxit=maxit, lambda_lock=lambda_lock)
+	fitter.fit(maxit=maxit, lambda_lock=lambda_lock, verbose=verbose)
 
-	#generate smoothed probability function
-	grid_p = fitter.component_probability(grid, 1)
-	probability_kernel = TailKernel(**kernel_kwargs)
-	probability_kernel.apply(grid, grid_p)
-	grid_p = smooth(grid_p, int(100*p_smoothing))
-	d = interp1d(grid, grid_p)
-
-	#return probabilities
-	out = d(all_points)
-	out[out > 1] =  1
-	out[out < 0] = 0
-	return out
+	# make monotonic
+	probs = fitter.q[1]
+	low_bound = component1_points.min()
+	high_bound = component0_points.median()
+	mask = (all_points>= low_bound) & (all_points <= high_bound)
+	exog = sm.add_constant(all_points.values.reshape((-1, 1)))
+	binomial_model = sm.GLM(probs[mask.values], exog[mask.values], family=sm.families.Binomial())
+	binomial_results = binomial_model.fit()
+	monotonic_probs = binomial_results.predict(exog)
+	return monotonic_probs
 
 
 def _check_controls(control_cols, control_matrix, gene_effect, label):
@@ -1047,6 +1045,9 @@ def _check_controls(control_cols, control_matrix, gene_effect, label):
 		raise ValueError("You can only specify one of `{0}` or `{0}_matrix` ".format(var_name))
 
 	if control_matrix is None:
+		if hasattr(control_cols, "shape"):
+			if len(control_cols.shape) > 1:
+				raise ValueError(f'if passed, {label} must be a 1D iterable')
 		missing = list(set(control_cols) - set(gene_effect.columns))
 		if missing:
 			warn("Not all %s found in the gene effect columns: %r" % (label, missing[:5]))
@@ -1080,6 +1081,7 @@ def _check_controls(control_cols, control_matrix, gene_effect, label):
 def get_probability_dependent(gene_effect, 
 	negative_controls=None, positive_controls=None, 
 	negative_control_matrix=None, positive_control_matrix=None,
+	verbose=False,
 	**kwargs):
 	'''
 	Generates a matrix of the same dimensions as `gene_effect` where the values are probabilites
@@ -1115,16 +1117,23 @@ def get_probability_dependent(gene_effect,
 	gene_effect = gene_effect - np.nanmean(gene_effect.mask(~negative_control_matrix))
 
 	def row_probability(x):
+		component0 = x[negative_control_matrix.loc[x.name]].dropna()
+		component1 = x[positive_control_matrix.loc[x.name]].dropna()
+		if not len(component0):
+			raise KeyError("no non-null negative controls found for %s" % x.name)
+		if not len(component1):
+			raise KeyError("no non-null positive controls found for %s" % x.name)
 		return probability_2class(
-			x[negative_control_matrix.loc[x.name]].dropna(), 
-			x[positive_control_matrix.loc[x.name]].dropna(), 
+			component0, 
+			component1, 
 			x.dropna(), 
+			verbose=verbose,
 			**kwargs
 		)
 
 	return pd.DataFrame({
 		ind: pd.Series(row_probability(row), index=row.dropna().index)
-		for ind, row in gene_effect.iterrows()
+		for ind, row in tqdm(gene_effect.iterrows(), total=len(gene_effect))
 	}).reindex(index=gene_effect.columns).T
 
 

@@ -14,7 +14,7 @@ extras_require['all'] = sorted(set.union(*[set(v) for v in extras_require.values
 
 setup(
 	name='crispr_chronos',
-	version='2.3.3',
+	version='2.3.4',
 	author="BroadInstitute CDS",
 	description="Time series modeling of CRISPR perturbation readcounts in biological data",
 	packages=find_packages(),
