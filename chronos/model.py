@@ -829,7 +829,7 @@ class Chronos(object):
 		#that need to be selected from all_cells to get the corresponding cell line for each sequence in that library.
 		#sequence_index is the string indices (sequence_IDs) corresponding to the given row in the library.
 		#batch_map is similar to replicate_map, but maps pDNA batch rows to the corresponding late timepoints in each library.
-		(self.cells, self.replicates, self.all_sequences, self.all_replicates, \
+		(self.cells, self.replicates, self.all_sequences, \
 			self.all_cells, self.pDNA_unique, self.cell_indices, self.sequence_cell_line_map, 
 			self.sequence_index, self.sequence_replicate_map, self.replicate_cell_line_map, 
 			self.replicate_index, self.batch_map
@@ -1217,7 +1217,6 @@ class Chronos(object):
 		}
 
 		all_sequences = sorted(set.union(*[set(v.values) for v in sequences.values()]))
-		all_replicates = sorted(set.union(*[set(v) for v in replicates.values()]))
 		all_cells = sorted(set.union(*[set(v) for v in cells.values()]))
 
 		#This is necessary to consume copy number provided for only the cell-guide blocks present in each library
@@ -1316,7 +1315,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 				 	all_sequences, pDNA_unique[key], self.np_dtype)
 				for key in self.keys}
 
-		return (cells, replicates, all_sequences, all_replicates, all_cells, pDNA_unique, cell_indices, 
+		return (cells, replicates, all_sequences, all_cells, pDNA_unique, cell_indices, 
 			sequence_cell_line_map, sequence_index, 
 			sequence_replicate_map, replicate_cell_line_map, replicate_index, 
 			batch_map
@@ -1790,20 +1789,14 @@ guide abundance"
 		_change = {}
 		_growth = {}
 
-		# only gather from replicate to sequence level if necessary - for single timepoint data,
-		# usually will not be
 		_new_growth = dict(_gene_effect_growth.items())
 		for key in self.keys:
-			if not (
-				self.sequence_replicate_map[key]["gather_ind_inner"] 
-				== self.sequence_replicate_map[key]["gather_ind_outer"]
-			).all():
-				#map the estimated growth from replicate to late time point sequence
-				_new_growth[key] = tf.gather(
-							_gene_effect_growth[key], 
-							self.sequence_replicate_map[key]['gather_ind_inner'],
-							axis=0, name="Growth_sequence_indexed_%s" % key
-						)
+			#map the estimated growth from replicate to late time point sequence
+			_new_growth[key] = tf.gather(
+						_gene_effect_growth[key], 
+						self.sequence_replicate_map[key]['gather_ind_inner'],
+						axis=0, name="Growth_sequence_indexed_%s" % key
+					)
 
 		with tf.compat.v1.name_scope("FC"):
 			for key in self.keys:
@@ -2530,7 +2523,10 @@ your data" % missing
 	def __del__(self):
 		for handle in self.persistent_handles:
 			tf.compat.v1.delete_session_tensor(handle)
-		self.sess.close()
+		try:
+			self.sess.close()
+		except AttributeError:
+			pass
 
 
 	################################################################################################

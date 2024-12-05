@@ -21,7 +21,8 @@ except ImportError:
 
 def fit_weighted_lognorm(x, keep_points=20):
 	'''fit a lognormal distribution to `pandas.Series` `x` using auxiliary linear regression 
-	on the inverse normal cumulative density function vs log(`x`). `x` is clipped to be positive
+	on the inverse normal cumulative density function vs log(`x`). `x` is clipped to be positive,
+	restricted to the `keep_points` largest points,
 	and the regression is weighted by the value of `x` so the fit focuses heavily on matching
 	the right tail.
 	Returns:
