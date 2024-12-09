@@ -2045,10 +2045,11 @@ guide abundance"
 		mean_fold_change.replace(0, 1e-3, inplace=True)
 		denom = sequence_map.set_index("sequence_ID").loc[last_sequences].groupby("cell_line_name").days.max() - screen_delay
 		denom = denom.loc[mean_fold_change.index] * Chronos.default_timepoint_scale
+
 		if (denom <= 0).any():
 			raise ValueError("Some lines have no replicates with `days` post infection greater than `initial_screen_delay`")
 		return pd.DataFrame(
-			np.log(mean_fold_change.values) / denom.values.reshape((-1, 1)),
+			np.log(np.array(mean_fold_change.values)) * 1/ np.array(denom.values.reshape((-1, 1))),
 			index=mean_fold_change.index, columns=mean_fold_change.columns
 		)
 
@@ -2075,52 +2076,60 @@ guide abundance"
 		self.printer.print('verifying user inputs')
 		for key in self.keys:
 			if pd.isnull(self.sess.run(self._days[key], self.run_dict)).sum().sum() > 0:
-				assert False, "nulls found in self._days[%s]" %key
+				raise ValueError("nulls found in self._days[%s]" %key)
 			if pd.isnull(self.sess.run(self._t0[key], self.run_dict)).sum().sum() > 0:
-				assert False, "nulls found in self._t0[%s]" %key
+				raise ValueError("nulls found in self._t0[%s]" %key)
 			if pd.isnull(self.sess.run(self._normalized_readcounts[key], self.run_dict)).sum().sum() > 0:
-				assert False, "nulls found in self._excess_variance[%s]" %key
+				raise ValueError("nulls found in self._excess_variance[%s]" %key)
 			if (self.sess.run(self._excess_variance[key], self.run_dict) < 0).sum().sum() > 0:
-				assert False, "negative values found in self._excess_variance[%s]" %key
+				raise ValueError("negative values found in self._excess_variance[%s]" %key)
 
 		#variables
 		self.printer.print('verifying variables')
 		if pd.isnull(self.sess.run(self._combined_gene_effect, self.run_dict)).sum().sum() > 0:
-			assert False, "nulls found in self._combined_gene_effect"
+			raise ValueError("nulls found in self._combined_gene_effect")
 		if pd.isnull(self.sess.run(self.v_guide_efficacy, self.run_dict)).sum().sum() > 0:
-			assert False, "nulls found in self.v_guide_efficacy"
+			raise ValueError("nulls found in self.v_guide_efficacy")
 		if pd.isnull(self.sess.run(self._guide_efficacy, self.run_dict)).sum().sum() > 0:
-			assert False, "nulls found in self._guide_efficacy"
+			raise ValueError("nulls found in self._guide_efficacy")
 
 		#calculated terms
 		self.printer.print('verifying calculated terms')
 		for key in self.keys:
 			if pd.isnull(self.sess.run(self.v_replicate_efficacy[key], self.run_dict)).sum().sum() > 0:
-				assert False, "nulls found in self.v_replicate_efficacy[%r]" % key
+				raise ValueError("nulls found in self.v_replicate_efficacy[%r]" % key)
+
 			if pd.isnull(self.sess.run(self._efficacy[key], self.run_dict)).sum().sum() > 0:
-				assert False, "nulls found in self._efficacy[%r]" % key
+				raise ValueError("nulls found in self._efficacy[%r]" % key)
+
 			self.printer.print('\t' + key + ' _gene_effect')
 			if pd.isnull(self.sess.run(self._gene_effect_growth[key], self.run_dict)).sum().sum() > 0:
-				assert False, "nulls found in self._gene_effect_growth[%s]" %key
+				raise ValueError("nulls found in self._gene_effect_growth[%s]" %key)
+
 			self.printer.print('\t' + key + ' _selected_efficacies')
 			if pd.isnull(self.sess.run(self._selected_efficacies[key], self.run_dict)).sum().sum() > 0:
-				assert False, "nulls found in self._selected_efficacies[%s]" %key
+				raise ValueError("nulls found in self._selected_efficacies[%s]" %key)
+
 			self.printer.print('\t' + key + '_predicted_readcounts_unscaled')
 			if pd.isnull(self.sess.run(self._predicted_readcounts_unscaled[key], self.run_dict)).sum().sum() > 0:
-				assert False, "nulls found in self._predicted_readcounts_unscaled[%s]" %key
+				raise ValueError("nulls found in self._predicted_readcounts_unscaled[%s]" %key)
+
 			if (self.sess.run(self._predicted_readcounts_unscaled[key], self.run_dict) < 0).sum().sum() > 0:
-				assert False, "negatives found in self._predicted_readcounts_unscaled[%s]" %key
+				raise ValueError("negatives found in self._predicted_readcounts_unscaled[%s]" %key)
 			self.printer.print('\t' + key + ' _predicted_readcounts')
+
 			df = self.sess.run(self._predicted_readcounts[key], self.run_dict)
 			if np.sum(pd.isnull(df).sum()) > 0:
-				assert False, "%i out of %i possible nulls found in self._predicted_readcounts[%s]" % (
+				raise ValueError("%i out of %i possible nulls found in self._predicted_readcounts[%s]" % (
 					np.sum(pd.isnull(df).sum()), np.prod(df.shape), key
-					)
+					))
 			if np.sum((df < 0).sum()) > 0:
-				assert False, "negative values found in predicted_readcounts[%s]" % key
+				raise ValueError("negative values found in predicted_readcounts[%s]" % key)
+
 			self.printer.print('\t' + key + ' _normalized_readcounts')
 			if np.sum(pd.isnull(self.sess.run(self._normalized_readcounts[key], self.run_dict)).sum()) > 0:
-				assert False, "nulls found in self._normalized_readcounts[%s]" %key
+				raise ValueError("nulls found in self._normalized_readcounts[%s]" %key)
+
 			min_normalized_readcounts = self.sess.run(self._normalized_readcounts[key], self.run_dict).min().min()
 			if min_normalized_readcounts < 0:
 				raise ValueError("Negative Reads Per Million (normalized_readcounts) found (%f)" % min_normalized_readcounts)
@@ -2128,25 +2137,27 @@ guide abundance"
 			min_predicted_readcounts = self.sess.run(self._predicted_readcounts[key], self.run_dict).min().min()
 			if min_predicted_readcounts < 0:
 				raise ValueError("Negative predicted normalized reads (predicted_readcounts) found (%f)" % min_predicted_readcounts)
+			
+			self.printer.print("\t" + key + " _excess_variance")
+			if np.sum(pd.isnull(self.excess_variance[key])) > 0:
+				raise ValueError("nulls found in excess_variance:\n%r" %
+					self.excess_variance[key][self.excess_variance[key].isnull()]
+				)
+
 			self.printer.print('\t' + key + ' _cost_presum')
-			df = self.cost_presum[key]
-			self.printer.print("sess run")
+			df = pd.DataFrame(
+				self.sess.run(self._cost_presum[key], self.run_dict),
+				index=self.sequence_index[key], columns=self.column_map[key]
+			)
 			if np.sum(pd.isnull(df).sum()) > 0:
-				print(df)
-				print()
+				print(df.loc[df.isnull().any(axis=1), df.isnull().any(axis=0)])
+				print("total nulls:", df.isnull().sum().sum())
 				print(self.sess.run(
-					 tf.math.log(1 + self._excess_variance_expanded[key] * 1e6 * self._predicted_readcounts[key]), self.run_dict)
+					 tf.math.log(1 + self._excess_variance[key] * 1e6 * self._predicted_readcounts[key]), self.run_dict)
 				)
 				print()
-				print(self.sess.run(
-					(
-							self._normalized_readcounts[key]+1e-6) 
-						* tf.math.log(self._excess_variance_expanded[key] 
-						* (self._normalized_readcounts[key] + 1e-6) 
-					 ), 
-						self.run_dict)
-				)
 				raise ValueError("%i nulls found in self._cost_presum[%s]" % (pd.isnull(df).sum().sum(), key))
+
 			self.printer.print('\t' + key + ' _cost')
 			if pd.isnull(self.sess.run(self._cost, self.run_dict)):
 				assert False, "Cost is null"
