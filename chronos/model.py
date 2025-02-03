@@ -1712,9 +1712,13 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 	def _get_effect_days(self, _screen_delay, _days):
 		self.printer.print("\nbuilding effective days")
 		with tf.compat.v1.name_scope("effective_days"):
-			_effective_days = {key: 
-				tf.clip_by_value(val - _screen_delay, 0, 100, name=key)
-			for key, val in _days.items()}
+			try:
+				_effective_days = {key: 
+					tf.clip_by_value(val - _screen_delay, 0, 100, name=key)
+				for key, val in _days.items()}
+			except InvalidArgumentError:
+				raise RuntimeError("failed to make _effective_days. \nscreen_delay: %r\n\n \
+days: %r" % days)
 
 		self.printer.print("built effective days, shapes %r" % {key: val.get_shape().as_list() for key, val in _effective_days.items()})
 		return _effective_days

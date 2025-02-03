@@ -539,6 +539,7 @@ every map.")
 		'''
 
 		condition_pair = self._check_condition_pair(condition_pair)
+		print(condition_pair)
 
 		self.nondistinguished_map = {key: filter_sequence_map_by_condition(
 			self.condition_map[key], condition_pair)
@@ -801,6 +802,19 @@ every map.")
 
 
 def get_consensus_difference_statistics(comparison_statistics):
+	'''
+	Get a single p-value for each gene that its viability is different between the conditions,
+	summarized over cell lines. It does this by first checking the mean difference for each gene.
+	Cell lines where the difference for that gene has the opposite sign have their change in
+	likelihood forced to be negative. Then, the likelihood changes are summed across cell lines
+	for both the real comparison and the permuted label (null hypothesis) comparisons. P-values
+	are calculated as in `compare_conditions`.
+
+	Parameters:
+		`comparison_statistics`: output of `compare_conditions`
+	Returns:
+		`consensus_statistics`: `pnadas.DataFrame` in the same format as `comparison_statistics`
+	'''
 	cs = comparison_statistics.copy()
 	cs["likelihood_difference"] = cs["likelihood"] - cs["likelihood_undistinguished"]
 	n_perms = len([s for s in cs.columns if s.startswith("likelihood_permutation")])
