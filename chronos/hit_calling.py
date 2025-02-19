@@ -2,11 +2,12 @@ import numpy as np
 import pandas as pd
 from statsmodels.stats.multitest import fdrcorrection, multipletests
 import statsmodels.api as sm
-from .model import Chronos, check_inputs
+from .model import Chronos, check_inputs, calculate_fold_change, normalize_readcounts
 from .reports import sum_collapse_dataframes
+from .evaluations import fast_cor
 from warnings import warn
 from itertools import permutations
-from scipy.stats import gaussian_kde, norm, lognorm, combine_pvalues
+from scipy.stats import gaussian_kde, norm, lognorm, combine_pvalues, uniform, ks_1samp, linregress
 from scipy.interpolate import interp1d
 from scipy.signal import argrelextrema
 from sklearn.linear_model import LinearRegression
@@ -209,6 +210,31 @@ def empirical_pvalue_lognorm_extension(observed, null, direction=-1):
 		p.mask(observed < null.min(), p2, inplace=True)
 	return p
 
+class PNotCorrectedError(Exception):
+	pass
+
+
+def adjust_p_values(p_values, negative_control_index):
+	'''
+	Attempts to adjust `p_values` so that the negative controls are uniformly distributed in the left tail. 
+	This is done by performing OLS regression n the negative control p-values vs the expected uniform 
+	quantiles in log space, then predicting the expected deviation from uniformity for all p-values
+	and returning the residuals. 
+	'''
+	logged_p = np.log(p_values.clip(1e-16, 1)).sort_values()
+	logged_neg = logged_p.reindex(negative_control_index).dropna().sort_values()
+	if not len(logged_neg):
+		raise IndexError("no non-null values for the negative control index in the p_values")
+	grid = np.log(np.linspace(1/len(logged_neg), len(logged_neg)/(len(logged_neg)+1), len(logged_neg)))
+	lr = linregress(grid, logged_neg)
+	good_fit = lr.rvalue > .99 and lr.pvalue < .01
+	if not good_fit:
+		raise PNotCorrectedError(f"bad fit for regression in log space on negative control p values vs \
+the uniform distibution. Fit result:\n{lr}")
+	full_grid = np.log(np.linspace(1/len(logged_p), len(logged_p)/(len(logged_p)+1), len(logged_p)))
+	p_adjust = np.exp(logged_p - ((lr.slope-1) * full_grid + lr.intercept)).clip(0, 1)
+	return p_adjust
+
 
 ################################################################
 # C O M P A R E    C O N D I T I O N S
@@ -405,7 +431,85 @@ def check_condition_map(condition_map):
 				"`condition_map[%s]` missing expected columns %r" % (key, missing)
 			)
 
+def check_for_excess_correlation(readcounts, condition_map, negative_control_sgrnas):
+	warned = False
 
+	for library in readcounts:
+
+		library_readcounts = readcounts[library]
+		library_condition_map = condition_map[library]
+		library_negs = negative_control_sgrnas[library]
+		normed = normalize_readcounts(
+			library_readcounts, 
+			negative_control_sgrnas=library_negs, 
+			sequence_map=library_condition_map
+		)
+		lfc = np.log2(calculate_fold_change(
+			normed, 
+			sequence_map=library_condition_map, 
+			rpm_normalize=False
+		))
+
+		cell_groups=library_condition_map.groupby("cell_line_name")
+		mean_corrs = []
+
+		for cell_line, cell_group in cell_groups:
+
+			if cell_line == 'pDNA':
+				continue
+			corrs = fast_cor(
+				lfc.T.loc[library_negs, cell_group.sequence_ID]
+			)
+			np.fill_diagonal(corrs.values, np.nan)
+
+			day_groups = cell_group.groupby("days")
+
+			for days, day_group in day_groups:
+				group_conditions = day_group.condition.unique()
+				for i, condition1 in enumerate(group_conditions):
+					for condition2 in group_conditions[i:]:
+						rows = day_group.query(f'condition == "{condition1}"').sequence_ID
+						columns = day_group.query(f'condition == "{condition2}"').sequence_ID
+						corr_subset = corrs.loc[rows, columns]
+						mean_corrs.append(pd.Series({
+							"cell_line_name": cell_line,
+							"condition_pair": (condition1, condition2),
+							"same_condition": condition1 == condition2,
+							"days": days,
+							"mean_corr": corr_subset.mean().mean()
+						}))
+
+		mean_corrs = pd.DataFrame(mean_corrs)
+		diff_max = mean_corrs\
+			.groupby(["cell_line_name", "days"])\
+			.apply(lambda df: 
+				   df[df.same_condition].mean_corr.max() - df[~df.same_condition].mean_corr.max()
+			)
+		if diff_max.max() > .1:
+			warn("Library %s: Negative controls are more highly correlated between replicates of the same \
+condition than between conditions for one or more cell lines/conditions/time points:\n\n%r\n\n \
+Since we don't expect negative controls to have real viability effects, this implies that the biological \
+replicates are not genuinely independent measurements, and p-values will be optimistic. \
+This usually indicates that the replicates were not infected separately, and were instead \
+infected before splitting. \
+Chronos will try to adjust p-values to compensate for this effect, but the results are \
+not guaranteed to be calibrated. A large, high quality set of negative control genes are \
+essential for the adjustment. The correction should be robust if one or two of the negative \
+control genes turn out to be genuinely differential between experiments, so prioritize a larger \
+set over an extremely high confidence set of negative controls." 
+						  % (library, mean_corrs.drop("same_condition", axis=1))
+						 )
+			warned = True
+
+	return warned
+
+
+def check_calibration(pvals, max_allowed_ks_statistic=.1):
+	result = ks_1samp(pvals, uniform.cdf)
+	if result.statistic > max_allowed_ks_statistic and result.pvalue < .05:
+		return False
+	else:
+		return True
 
 
 class ConditionComparison():
@@ -427,6 +531,7 @@ class ConditionComparison():
 	}
 
 	def __init__(self, readcounts, condition_map, guide_gene_map,
+		negative_control_genes=None, negative_control_sgrnas=None,
 		print_to=None, **kwargs):
 		'''
 		Initialize the comparator.
@@ -441,10 +546,45 @@ class ConditionComparison():
 					If you wish to compare two cell lines, give them the same value in `cell_line_name`,
 					and different values for `condition`.
 			`guide_gene_map` (`dict` of `pandas.DataFrame`): map from sgRNAs to genes. See `model.Chronos`.
+			`negative_control_genes` (`None` or iterable): array-like of genes not expected to produce a viability phenotype. 
+					If not included, negative_control_sgrnas must be passed.
+					If 
+			`negative_control_sgrnas` (`None` or `dict` of iterable): Needed if `negative_control_genes` not included. A per-library
+					list of targeting sgRNAs not expected to produce a viability phenotype. See `model.Chronos`.
 			Additional keyword arguments will be passed to `model.Chronos` when training the models.
 		'''
 		check_condition_map(condition_map)
 		check_inputs(readcounts, guide_gene_map, condition_map)
+
+		no_negative_control_genes = False
+		try:
+			negative_control_genes = list(negative_control_genes)
+		except Exception:
+			pass
+
+		if not negative_control_genes:
+			no_negative_control_genes = True
+		else:
+			negative_control_genes = sorted(set(negative_control_genes) & set.union(*[set(v.gene) for v in guide_gene_map.values()]))
+			if not len(negative_control_genes):
+				raise ValueError("negative_control_genes not present in any library's genes. Sample: \n%r" % negative_control_genes[:5])
+		if not negative_control_sgrnas:
+			if no_negative_control_genes:
+				raise ValueError("one of `negative_control_genes` or `negative_control_sgrnas` must be specified")
+			negative_control_sgrnas = {library: val.query("gene in %r" % list(negative_control_genes)).sgrna
+			for library, val in guide_gene_map.items()}
+
+		self.negative_control_genes = negative_control_genes
+		self.negative_control_sgrnas = negative_control_sgrnas
+
+		print("checking for high negative control correlation between replicates in the same condition")
+		self.excess_correlation_warning = check_for_excess_correlation(readcounts, condition_map, negative_control_sgrnas)
+		if negative_control_genes is None:
+			negative_control_genes = []
+		if self.excess_correlation_warning and len(negative_control_genes) < 100:
+			raise RuntimeError("The biological replicates are not independent. A good set of at least 100 negative control \
+genes must be passed to check p-value calibration after compare_conditions is run.")
+
 		self.readcounts = readcounts
 		self.condition_map = Chronos._make_pdna_unique(condition_map, readcounts)
 		for key, val in self.condition_map.items():
@@ -539,7 +679,6 @@ every map.")
 		'''
 
 		condition_pair = self._check_condition_pair(condition_pair)
-		print(condition_pair)
 
 		self.nondistinguished_map = {key: filter_sequence_map_by_condition(
 			self.condition_map[key], condition_pair)
@@ -612,18 +751,60 @@ every map.")
 		)
 		significance_groups = significance.groupby("cell_line_name")
 		fdrs = []
+		adjusted_pvals = []
 		for line, group in significance_groups:
 			group = group.dropna(subset="likelihood_pval")
+
+			pvals = group.set_index("gene").likelihood_pval.dropna()
+
+			if self.negative_control_genes:
+
+				calibrated = check_calibration(
+					group.query(
+						"gene in %r" % list(self.negative_control_genes)
+					)["likelihood_pval"]
+				)
+
+				if not calibrated:
+					warn("p-values are not calibrated for negative controls. \
+Learning adjustment (but not guaranteed)")
+
+					try:
+
+						pvals = adjust_p_values(
+							pvals, 
+							self.negative_control_genes
+						)
+						adjusted_pvals.append(pd.DataFrame({
+							"neg_control_adjusted_pval": pvals.values,
+							"cell_line_name": line,
+							"gene": pvals.index
+						}))
+
+					except PNotCorrectedError as e:
+						warn(str(e) + f"\n. P-value correction for {line} failed and FDR is based on uncorrected \
+p-values for this cell line. FDRs may be optimistic or pessimistic.")
+
+
 			fdrs.append(pd.DataFrame({
-				"likelihood_fdr": multipletests(group["likelihood_pval"], .05, method=fdr_method)[1],
+				"likelihood_fdr": multipletests(pvals, .05, method=fdr_method)[1],
 				"cell_line_name": line,
-				"gene": group.gene
+				"gene": pvals.index
 			}))
+
 		fdrs = pd.concat(fdrs)
 
-		return gene_effect_annotations\
+		statistics = gene_effect_annotations\
 			.merge(significance, on=["cell_line_name", "gene"], how="outer")\
 			.merge(fdrs, on=["cell_line_name", "gene"], how="outer")
+
+		if adjusted_pvals:
+			adjusted_pvals = pd.concat(adjusted_pvals)
+			statistics = statistics.merge(
+				adjusted_pvals, on=["cell_line_name", "gene"], how="left"
+			)
+
+		return statistics
 
 
 	def get_readcount_gene_totals(self, retained_readcounts, condition_map, guide_gene_map):
@@ -645,13 +826,15 @@ every map.")
 			readcounts=self.retained_readcounts,
 			sequence_map=nondistinguished_map,
 			guide_gene_map=self.guide_gene_map,
+			negative_control_sgrnas=self.negative_control_sgrnas,
 			 use_line_mean_as_reference=np.inf,
 			 print_to=self.print_to,
 			**self.kwargs
 		)
 		undistinguished_model.train(**kwargs)
 		likelihood = cell_line_log_likelihood(undistinguished_model, nondistinguished_map)
-		self.undistinguished_model = undistinguished_model
+		#self.undistinguished_model = undistinguished_model
+		del undistinguished_model
 		return likelihood
 
 
@@ -668,6 +851,7 @@ every map.")
 			readcounts=self.retained_readcounts,
 			sequence_map=distinguished_map,
 			guide_gene_map=self.guide_gene_map,
+			negative_control_sgrnas=self.negative_control_sgrnas,
 			 use_line_mean_as_reference=np.inf,
 			 print_to=self.print_to,
 			**self.kwargs
@@ -676,7 +860,8 @@ every map.")
 
 		distinguished_gene_effect = distinguished_model.gene_effect
 		distinguished_likelihood = cell_line_log_likelihood(distinguished_model, distinguished_map)
-		self.distinguished_model = distinguished_model
+		del distinguished_model
+		#self.distinguished_model = distinguished_model
 
 		return distinguished_map, distinguished_likelihood, distinguished_gene_effect
 
@@ -701,6 +886,7 @@ every map.")
 			permuted_model = Chronos(readcounts=self.retained_readcounts, 
 								 sequence_map=permuted_map,
 								 guide_gene_map=self.guide_gene_map,
+								 negative_control_sgrnas=self.negative_control_sgrnas,
 								  use_line_mean_as_reference=np.inf,
 								  print_to=self.print_to,
 								**self.kwargs
@@ -887,7 +1073,7 @@ class MixFitEmpirical:
 		`data` (`numpy.ndarray` of `float`, shape = (k)): 1D array of observed values
 		`p` (`numpy.ndarray` of `float` in [0, 1], shape = (n, k)): `p[i, j]` is the probability 
 			density `density[n](data[k])`
-		`q`	(`numpy.ndarray` of `float` in [0, 1], shape = (n, k)): the posterior probability that
+		`q` (`numpy.ndarray` of `float` in [0, 1], shape = (n, k)): the posterior probability that
 			a point in `data` belongs to a distribution. 
 		`likelihood` (`float`): The mean log likelhood of the `data` given `p` and `q`.
 	'''

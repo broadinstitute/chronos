@@ -100,8 +100,8 @@ def get_naive(data):
 	naive = {}
 	for library in data["logfoldchange"]:
 		naive[library] = data['logfoldchange'][library]\
-			.groupby(data['guide_map'][library].set_index("sgrna").gene, axis=1)\
-			.median()\
+			.T.groupby(data['guide_map'][library].set_index("sgrna").gene)\
+			.median().T\
 			.groupby(data['sequence_map'][library].set_index("sequence_ID").cell_line_name)\
 			.median()
 	return naive
@@ -175,7 +175,8 @@ def qc_initial_data(title, readcounts, sequence_map, guide_map, negative_control
 		  doc_args=dict(
 			pagesize=letter, rightMargin=.5*inch, leftMargin=.5*inch,
 			topMargin=.5*inch,bottomMargin=.5*inch
-		  )
+		  ),
+		  specific_plot_dimensions={}
 ):
 	'''
 	QC dthe data that would be passed to Chronos. This can be helpful to develop a sense of data quality but also to exclude 
@@ -194,6 +195,8 @@ def qc_initial_data(title, readcounts, sequence_map, guide_map, negative_control
 		`directory` (`str`): where the report and figure panels will be generated.
 		`plot_width`, `plot_height` (`float`): size of plots that will be put in the report in inches.
 		`doc_args` (`dict`): additional arguments will be passed to `SimpleDocTemplate`.
+		`specific_plot_dimensions` (`dict` of 2-tuple`): if a plot's name is present, will use the the value
+			 to specify dimensions for that plot instead of deriving them from `plot_width` and `plot_height`
 	Returns:
 		`dict` containing the calculated QC metrics, which will also be in the report.
 	'''
@@ -206,6 +209,9 @@ def qc_initial_data(title, readcounts, sequence_map, guide_map, negative_control
 	
 	def add_image(filename):
 		fig = plt.gcf()
+		label = '.'.join(filename.split('.')[:-1])
+		if label in specific_plot_dimensions:
+			fig.set_size_inches(specific_plot_dimensions[label])
 		width, height = fig.get_size_inches()
 		plt.tight_layout()
 		fig.savefig(os.path.join(directory, filename))
@@ -285,7 +291,7 @@ scores near 0, with a long left tail of true viability depletion."
 	plt.legend()
 	plt.xlabel("Log Fold-Change of late timepoints from pDNA")
 	plt.gcf().set_size_inches((plot_width, plot_height))
-	add_image("lfc_distibution.png")
+	add_image("lfc_distribution.png")
 	
 	if 'NNMD' in metrics:
 		print("plotting control separation metrics")
@@ -380,7 +386,8 @@ def dataset_qc_report(title, data,
 						  doc_args=dict(
 							pagesize=letter, rightMargin=.5*inch, leftMargin=.5*inch,
 							topMargin=.5*inch,bottomMargin=.5*inch
-						  )
+						  ),
+						  specific_plot_dimensions={}
 ):
 	'''
 	QC the results of the Chronos run.
@@ -405,6 +412,8 @@ def dataset_qc_report(title, data,
 		`gene_effect_file` (`str`): If `data` is a path to a directory, this arg is passed to `load_chronos_data_for_qc`.
 		`plot_width`, `plot_height` (`float`): size of plots that will be put in the report in inches.
 		`doc_args` (`dict`): additional arguments will be passed to `SimpleDocTemplate`.
+		`specific_plot_dimensions` (`dict` of 2-tuple`): if a plot's name is present, will use the the value
+			 to specify dimensions for that plot instead of deriving them from `plot_width` and `plot_height`
 	Returns:
 		`dict` containing the calculated QC metrics, which will also be in the report.
 	'''
@@ -448,6 +457,9 @@ You passed '%s', %r" % (data, gene_effect_file))
 
 	def add_image(filename):
 		fig = plt.gcf()
+		label = '.'.join(filename.split('.')[:-1])
+		if label in specific_plot_dimensions:
+			fig.set_size_inches(specific_plot_dimensions[label])
 		width, height = fig.get_size_inches()
 		plt.tight_layout()
 		fig.savefig(os.path.join(directory, filename))
@@ -701,7 +713,8 @@ def comparative_qc_report(title, data,
 						  doc_args=dict(
 							pagesize=letter, rightMargin=.5*inch, leftMargin=.5*inch,
 							topMargin=.5*inch,bottomMargin=.5*inch
-						  )
+						  ),
+						  specific_plot_dimensions={}
 ):
 	'''
 	Compare the output of two Chronos runs, or Chronos with another algorithm (if that algorithm also 
@@ -729,6 +742,8 @@ def comparative_qc_report(title, data,
 		`gene_effect_file` (`str`): If `data` is a path to a directory, this arg is passed to `load_chronos_data_for_qc`.
 		`plot_width`, `plot_height` (`float`): size of plots that will be put in the report in inches.
 		`doc_args` (`dict`): additional arguments will be passed to `SimpleDocTemplate`.
+		`specific_plot_dimensions` (`dict` of 2-tuple`): if a plot's name is present, will use the the value
+			 to specify dimensions for that plot instead of deriving them from `plot_width` and `plot_height`
 	Returns:
 		`dict` containing the calculated QC metrics, which will also be in the report.
 	'''
@@ -752,6 +767,9 @@ def comparative_qc_report(title, data,
 
 	def add_image(filename):
 		fig = plt.gcf()
+		label = '.'.join(filename.split('.')[:-1])
+		if label in specific_plot_dimensions:
+			fig.set_size_inches(specific_plot_dimensions[label])
 		width, height = fig.get_size_inches()
 		plt.tight_layout()
 		fig.savefig(os.path.join(directory, filename))

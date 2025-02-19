@@ -5,6 +5,7 @@ from warnings import warn
 
 from matplotlib import pyplot as plt
 from matplotlib import cm
+from matplotlib import colormaps
 from matplotlib.ticker import FormatStrFormatter
 from matplotlib.colors import Normalize, LogNorm
 from matplotlib.cm import ScalarMappable
@@ -416,7 +417,7 @@ def binplot(x, y, binned_axis='x', nbins=10, endpoints=None, right=False, ax=Non
 	normer.autoscale(counts.values)
 	cvals = normer(counts.values)
 	if isinstance(colors, str):
-		cmap = cm.get_cmap(colors)
+		cmap = colormaps[colors]
 		colors = [cmap(v) for v in cvals]
 	for box, color in zip(boxes['boxes'], colors):
 		box.set_facecolor(color)

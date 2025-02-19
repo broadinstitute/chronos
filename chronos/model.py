@@ -484,7 +484,10 @@ def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, 
 	mask = pd.pivot(lfc_stack, values="Mask", index="sequence_ID", columns="sgrna")
 
 	print("aligning_mask")
-	mask = mask.reindex(index=readcounts.index, columns=readcounts.columns).fillna(False)
+	mask = mask\
+		.reindex(index=readcounts.index, columns=readcounts.columns)\
+		.fillna(False)\
+		.astype(bool)
 
 	print("NaNing")
 	readcounts.mask(mask, inplace=True)
@@ -612,6 +615,31 @@ class Chronos(object):
 	Every set of parameters that are fit per-library are dicts. If `Chronos.v_a` is a dict, the subsequent attributes in the graph are 
 	also dicts.
 
+	MODEL:
+	Probably the most difficult part of understanding the Chronos object is following the indexing of
+	the tensor objects.
+
+	The core matrix is gene effect, which is actually two tensors, a matrix and a per-gene vector of means:
+
+	                 Genes                      Genes
+	  		  _____________________		   __________________
+	  cell    |  Mean-centered           1| Mean gene effect
+	  lines   |  gene effect          +
+              |  (column mean = 0)   
+
+	The next step is adding the library effect, then expanding the cell line axis to replicate IDs for that library
+	Different libraries in Chronos are mostly represented as values in a dictionary, rather than indices in a tensor
+	dimension. The exception is _library_effects, which is a matrix to enable normalization across libraries.
+
+	                    replicate                               Genes                     Genes
+	  		            growth rate                      _____________________	    _________________	   
+	{Library_i:          _1_              \\       cell |  Combined                 i|  Library effects[i]   
+	                     |                        lines |  gene effect          +  
+              replicates |         X          {         |                                                    }
+						 |                //
+						 |
+
+	This object, a dict of replicate x gene matrices, is called `_gene_effect_growth`. 
 
 	Settable Attributes: these CAN be set manually to interrogate the model or for other advanced uses, but NOT RECOMMENDED. Most users 
 	will just want to read them out after training.
@@ -1339,7 +1367,12 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 						use_line_mean_as_reference=use_line_mean_as_reference
 					)[self.sequence_index[key]]
 			elif not key in excess_variance:
-				excess_variance[key] = pd.Series(prior_variance, index=self.sequence_index[key])
+				try:
+					excess_variance[key] = pd.Series(prior_variance, index=self.sequence_index[key])
+				except UnboundLocalError:
+					raise ValueError("excess_variance was passed as dict without key for %r:\n\n%r" % 
+						(key, excess_variance)
+					)
 		return excess_variance
 
 	def _get_excess_variance_tf(self, excess_variance):

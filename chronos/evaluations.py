@@ -2,6 +2,7 @@
 from warnings import warn
 import numpy as np
 import pandas as pd
+pd.set_option('future.no_silent_downcasting', True)
 from colorsys import hsv_to_rgb, rgb_to_hsv
 
 try:
@@ -44,8 +45,14 @@ Try `pip install adjustText`")
 
 def np_cor_no_missing(x, y):
 	"""Full column-wise Pearson correlations of two matrices with no missing values."""
-	xv = (x - x.mean(axis=0))/x.std(axis=0)
-	yv = (y - y.mean(axis=0))/y.std(axis=0)
+	try:
+		xv = (x - x.mean(axis=0))/x.std(axis=0)
+		yv = (y - y.mean(axis=0))/y.std(axis=0)
+	except TypeError as e:
+		print("failed to correlate")
+		print(x)
+		print(y)
+		raise e
 	result = np.dot(xv.T, yv)/len(xv)
 	return result
 
@@ -59,7 +66,11 @@ def group_cols_with_same_mask(x):
 	"""
 	per_mask = {}
 	for i in range(x.shape[1]):
-		o_mask = np.isfinite(x[:, i])
+		try:
+			o_mask = pd.notnull(x[:, i])
+		except TypeError as e:
+			print(x.dtype)
+			raise(e)
 		o_mask_b = np.packbits(o_mask).tobytes()
 		if o_mask_b not in per_mask:
 			per_mask[o_mask_b] = [o_mask, []]
@@ -213,14 +224,13 @@ def _make_aliases(keys):
 	true_unique = deduplicated.copy()
 	for i in range(len(deduplicated)):
 		for j in range(i+1, len(deduplicated)):
-			true_unique.iloc[i], true_unique.iloc[j] = _strip_identical_prefix(true_unique[i], true_unique[j])
+			true_unique.iloc[i], true_unique.iloc[j] = _strip_identical_prefix(true_unique.iloc[i], true_unique.iloc[j])
 	out = {}
 	for s in keys:
 		if deduplicated[s].startswith(true_unique[s]):
 			out[s] = deduplicated[s][:2]
 		else:
 			out[s] = deduplicated[s][0] + true_unique[s][0]
-	print(deduplicated, true_unique)
 	return pd.Series(out)
 
 
@@ -737,20 +747,26 @@ def selective_mutated_vs_not_scatter(gene_effect, mutation_matrix,
 	gene_effect = gene_effect.dropna(how='any', axis=1)
 	mutation_matrix = get_aligned_mutation_matrix(mutation_matrix, gene_effect)
 	gene_effect, mutation_matrix = gene_effect.align(mutation_matrix, join="inner")
-	mutation_matrix = mutation_matrix.dropna(how='all', axis=1)
+	mutation_matrix = mutation_matrix.dropna(how='all', axis=1).astype(bool)
 	gene_effect = gene_effect.dropna(how='all', axis=1)
 	gene_effect, mutation_matrix = gene_effect.align(mutation_matrix, join="inner")
 	if gene_effect.shape[0] == 0 or gene_effect.shape[1] == 0:
 		raise ValueError("Gene_effect and mutation_matrix have an axis with no overlaps (either genes or screens)")
 	scale = np.log2(mutation_matrix.sum().astype(float))
-	nnmds = mutation_matrix.apply(lambda x: nnmd(gene_effect[x.name][x], gene_effect[x.name][~x]),
+	nnmds = mutation_matrix.apply(lambda x: nnmd(gene_effect[x.name][x], gene_effect[x.name][x==False]),
 								 axis=0)
-	aurocs = mutation_matrix.apply(lambda x: auroc(gene_effect[x.name][x], gene_effect[x.name][~x]),
+	aurocs = mutation_matrix.apply(lambda x: auroc(gene_effect[x.name][x], gene_effect[x.name][x==False]),
 								 axis=0)
-	total_nnmd = nnmd(gene_effect[mutation_matrix.fillna(False)].stack(), gene_effect[~mutation_matrix.fillna(False)].stack())
-	total_auroc = auroc(gene_effect[mutation_matrix].stack(), gene_effect[~mutation_matrix].stack())
+	total_nnmd = nnmd(
+		gene_effect[mutation_matrix==True].stack(), 
+		gene_effect[mutation_matrix.fillna(False)==False].stack()
+	)
+	total_auroc = auroc(
+		gene_effect[mutation_matrix==True].stack(), 
+		gene_effect[mutation_matrix==False].stack()
+		)
 	pos_means = gene_effect[mutation_matrix].mean()
-	neg_means = gene_effect[~mutation_matrix].mean()
+	neg_means = gene_effect[mutation_matrix==False].mean()
 	pos_means, neg_means = pos_means.align(neg_means, join="inner")
 	
 	if ax:
@@ -758,7 +774,7 @@ def selective_mutated_vs_not_scatter(gene_effect, mutation_matrix,
 	plt.scatter(neg_means, pos_means, s=10*scale, c=scale, **scatter_args)
 	if label_outliers:
 		outliers = identify_outliers_by_diagonal(neg_means, pos_means, label_outliers)
-		texts = [plt.text(s=neg_means.index[i],x=neg_means[i], y=pos_means[i], fontsize=6, color=[.8, .3, .05]) for i in outliers]
+		texts = [plt.text(s=neg_means.index[i],x=neg_means.iloc[i], y=pos_means.iloc[i], fontsize=6, color=[.8, .3, .05]) for i in outliers]
 		if adjustText_present:
 			adjust_text(texts, x=neg_means.values, y=pos_means.values, arrowprops=dict(lw=1, arrowstyle="-", color="black"),
 				)
@@ -1141,7 +1157,7 @@ def check_integration_umap(gene_effect, sequence_map,
 	
 	pca = PCA()
 	pcs = pd.DataFrame(pca.fit_transform(gene_effect.dropna(axis=1).values), index=gene_effect.index)
-	corrs_squared = fast_cor(pcs, indicators)**2
+	corrs_squared = fast_cor(pcs, indicators.astype(float))**2
 	out['library_pc_variance_explained_max'] = corrs_squared\
 											.multiply(pca.explained_variance_ratio_, axis=0)\
 											.sum()\
@@ -1198,7 +1214,7 @@ def check_integration_mean_deviation(gene_effect, sequence_map,
 	
 	out = {}
 	sd = gene_effect.std()
-	normed_library_sd = np.sqrt(indicators.sum()) * np.abs(library_means.subtract(means, axis=0))
+	normed_library_sd = np.sqrt(indicators.astype(float).sum()) * np.abs(library_means.subtract(means, axis=0))
 	out['normed_library_deviation'] = normed_library_sd.mean().mean()
 	if legend:
 		handles = append_to_legend_handles([
