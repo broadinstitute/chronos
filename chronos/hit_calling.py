@@ -356,7 +356,18 @@ def create_condition_sequence_map(condition_map, condition_pair=None):
 	
 	return out
 
-	
+def _balance_permutation(perm):
+	'''
+	perm: an array with values which may be repeated
+	if all unique values already have equal counts, does nothing. Otherwise, randomly selected instances of
+		each unique value replaced with NaNs until balanced.
+	'''
+	counts = pd.Series(perm).value_counts().drop(np.nan, errors="ignore")
+	counts_min = counts.min()
+	for ind in counts.index:
+		indices = np.argwhere(perm == ind).flatten()
+		perm[np.random.choice(indices, size=counts[ind] - counts_min, replace=False)] = np.nan
+
 def create_permuted_sequence_maps(condition_map, condition_pair=None, allow_reverse=False):
 	'''
 	Returns a list of condition maps, where each cell line within each map has a unique permutation
@@ -394,7 +405,15 @@ the 'condition' column of `condition_map` must have exactly two unique values fo
 			perms = unique_permutations_no_reversed(y.condition)
 
 		for perm in perms:
-			tentative = y.copy()
+			# randomly trim excess replicates of the more common condition
+			# so total replicates balance - otherwise impossible to construct
+			# two pseudo conditions with the same number of replicates from each 
+			# real condition
+			_balance_permutation(perm)
+
+		for perm in perms:
+			tentative = y[pd.notnull(perm)].copy()
+			perm = perm[pd.notnull(perm)]
 			tentative["true_condition"] = tentative["condition"]
 			tentative["condition"] = perm
 			tentative["cell_line_name"] = line
@@ -483,7 +502,8 @@ def check_for_excess_correlation(readcounts, condition_map, negative_control_sgr
 		diff_max = mean_corrs\
 			.groupby(["cell_line_name", "days"])\
 			.apply(lambda df: 
-				   df[df.same_condition].mean_corr.max() - df[~df.same_condition].mean_corr.max()
+				   df[df.same_condition].mean_corr.max() - df[~df.same_condition].mean_corr.max(),
+				   include_groups=False
 			)
 		if diff_max.max() > .1:
 			warn("Library %s: Negative controls are more highly correlated between replicates of the same \
@@ -532,6 +552,7 @@ class ConditionComparison():
 
 	def __init__(self, readcounts, condition_map, guide_gene_map,
 		negative_control_genes=None, negative_control_sgrnas=None,
+		keep_models=False, 
 		print_to=None, **kwargs):
 		'''
 		Initialize the comparator.
@@ -551,6 +572,7 @@ class ConditionComparison():
 					If 
 			`negative_control_sgrnas` (`None` or `dict` of iterable): Needed if `negative_control_genes` not included. A per-library
 					list of targeting sgRNAs not expected to produce a viability phenotype. See `model.Chronos`.
+			`keep_models` (`bool`): if true, Chronos models trained in `.compare_conditions` will be retained.
 			Additional keyword arguments will be passed to `model.Chronos` when training the models.
 		'''
 		check_condition_map(condition_map)
@@ -592,6 +614,7 @@ genes must be passed to check p-value calibration after compare_conditions is ru
 		self.guide_gene_map = guide_gene_map
 
 		self.print_to = print_to
+		self.keep_models = keep_models
 		self.kwargs = kwargs
 		self.keys = sorted(self.readcounts.keys())
 
@@ -833,8 +856,10 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 		)
 		undistinguished_model.train(**kwargs)
 		likelihood = cell_line_log_likelihood(undistinguished_model, nondistinguished_map)
-		#self.undistinguished_model = undistinguished_model
-		del undistinguished_model
+		if self.keep_models:
+			self.undistinguished_model = undistinguished_model
+		else:
+			del undistinguished_model
 		return likelihood
 
 
@@ -860,8 +885,10 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 
 		distinguished_gene_effect = distinguished_model.gene_effect
 		distinguished_likelihood = cell_line_log_likelihood(distinguished_model, distinguished_map)
-		del distinguished_model
-		#self.distinguished_model = distinguished_model
+		if self.keep_models:
+			self.distinguished_model = distinguished_model
+		else:
+			del distinguished_model
 
 		return distinguished_map, distinguished_likelihood, distinguished_gene_effect
 
@@ -880,6 +907,7 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 		out = []
 		permuted_gene_effects = []
 		counts = 0
+		self.permuted_models = []
 		for i, permuted_map in enumerate(permuted_maps):
 			print('\trandom iteration %i' %i)
 				
@@ -895,12 +923,17 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 
 			out.append(cell_line_log_likelihood(permuted_model, permuted_map))
 			permuted_gene_effects.append(permuted_model.gene_effect)
-			del permuted_model
+			if self.keep_models:
+				self.permuted_models.append(permuted_model)
+			else:
+				del permuted_model
 
 			counts += 1
 			if counts == max_null_iterations:
 				break
 
+		if not self.keep_models:
+			del self.permuted_models
 		return permuted_maps, out, permuted_gene_effects
 
 
