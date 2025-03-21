@@ -12,6 +12,7 @@ from scipy.interpolate import interp1d
 from scipy.signal import argrelextrema
 from sklearn.linear_model import LinearRegression
 from sympy.utilities.iterables import multiset_permutations
+from shutil import rmtree
 try:
 	from tqdm import tqdm
 except ImportError:
@@ -855,6 +856,7 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 			**self.kwargs
 		)
 		undistinguished_model.train(**kwargs)
+		undistinguished_model.save(".chronos_compare_undistinguished_model", overwrite=True)
 		likelihood = cell_line_log_likelihood(undistinguished_model, nondistinguished_map)
 		if self.keep_models:
 			self.undistinguished_model = undistinguished_model
@@ -878,9 +880,11 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 			guide_gene_map=self.guide_gene_map,
 			negative_control_sgrnas=self.negative_control_sgrnas,
 			 use_line_mean_as_reference=np.inf,
+			 pretrained=True,
 			 print_to=self.print_to,
 			**self.kwargs
 		)
+		distinguished_model.import_model(".chronos_compare_undistinguished_model")
 		distinguished_model.train(**kwargs)
 
 		distinguished_gene_effect = distinguished_model.gene_effect
@@ -916,9 +920,11 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 								 guide_gene_map=self.guide_gene_map,
 								 negative_control_sgrnas=self.negative_control_sgrnas,
 								  use_line_mean_as_reference=np.inf,
+								  pretrained=True,
 								  print_to=self.print_to,
 								**self.kwargs
 								)
+			permuted_model.import_model(".chronos_compare_undistinguished_model")
 			permuted_model.train(**kwargs)
 
 			out.append(cell_line_log_likelihood(permuted_model, permuted_map))
@@ -934,6 +940,7 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 
 		if not self.keep_models:
 			del self.permuted_models
+		rmtree(".chronos_compare_undistinguished_model")
 		return permuted_maps, out, permuted_gene_effects
 
 

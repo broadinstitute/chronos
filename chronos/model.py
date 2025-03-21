@@ -631,7 +631,7 @@ class Chronos(object):
 	Different libraries in Chronos are mostly represented as values in a dictionary, rather than indices in a tensor
 	dimension. The exception is _library_effects, which is a matrix to enable normalization across libraries.
 
-	                    replicate                               Genes                     Genes
+	                    replicate                               genes                     genes
 	  		            growth rate                      _____________________	    _________________	   
 	{Library_i:          _1_              \\       cell |  Combined                 i|  Library effects[i]   
 	                     |                        lines |  gene effect          +  
@@ -639,7 +639,48 @@ class Chronos(object):
 						 |                //
 						 |
 
-	This object, a dict of replicate x gene matrices, is called `_gene_effect_growth`. 
+	This object, a dict of replicate x gene matrices, is called `_gene_effect_growth`. The next step is multiplying by the
+	effective days, i.e. that number of days from transfection for the sequence minus a per-gene "screen delay"
+	that models the lag between knockout and the onset of a viabiliy phenotype (set to 3 days by default):
+					                       
+	  		           			                                      _days_i               
+	  		                 genes                                                    
+	{Library_i:          ___________                                   _1_                              }
+	                     | _gene       //    \\                       |               genes     
+              replicates | growth         X        clip_0{  sequences |      --    ____________  }
+						 | rate        \\    //                       |          1|_screen_delay
+						 |                                            |          
+   
+	This object, a dict of sequences by genes, we'll call gene_growth - it doesn't have a variable assigned.
+	It is used to get the relative change in abundance expected if the KO is perfect.
+                                   
+	{library_i:     exp(gene_growth_i) - 1}
+
+	Meanwhile, we take the outer product of the per-replicate and per-guide efficacy:
+                              
+                               _1_        guides
+                              |          _______    
+	{library_i:     replicates|     X  1|            }
+                              |
+
+	This object, a dict pf replicate by guide matrices is _efficacy. It's expanded to the sequence level
+	and multiplied by gene_growth to get _growth:
+
+
+                                    guides                                   genes
+                                ____________                           ______________       
+	{library_i:                |                //   \\               |                  }
+	                 replicates| _efficacy_i       X        sequences |  growth_i    
+                               |                \\   //               |
+
+	This object, a dict of sequence by guide matrices, is called _change, and represents the expected
+	fold change in abundance for each guide from the initial abundance. But we do not assume the initial
+	measured abundance is correct. We allow for something we call "pDNA error", a systematic departure
+	from the measured departure.
+
+
+                    
+	{library_i      sequences            
 
 	Settable Attributes: these CAN be set manually to interrogate the model or for other advanced uses, but NOT RECOMMENDED. Most users 
 	will just want to read them out after training.
@@ -2867,7 +2908,7 @@ your data" % missing
 		and `replicate_efficacy` 
 		'''
 		out = {key: pd.DataFrame(self.sess.run(self._efficacy[key], self.run_dict),
-					index=self.replicate_index[key], columns=self.all_guides)
+					index=self.replicate_index[key], columns=self.column_map[key])
 				for key in self.keys}
 		for v in out.values():
 			v.index.name = "replicate_ID"
