@@ -451,6 +451,25 @@ def check_condition_map(condition_map):
 				"`condition_map[%s]` missing expected columns %r" % (key, missing)
 			)
 
+def _remap_growth_rates(growth_rate, old_map, new_map):
+	
+	growth_rates = []
+	
+	for library, mapper in old_map.items():
+		sub = growth_rate.query("library == %r" % library).copy()
+		mapper = mapper[["sequence_ID", "replicate_ID"]].drop_duplicates(subset=["replicate_ID"])
+		sub = pd.merge(sub, mapper, on="replicate_ID", how="left")
+		sub["replicate_ID"] = new_map\
+			[library]\
+			.set_index("sequence_ID")\
+			["replicate_ID"]\
+			.loc[sub.sequence_ID]\
+			.values
+		growth_rates.append(sub)
+		
+	return(pd.concat(growth_rates, ignore_index=True))
+
+
 def check_for_excess_correlation(readcounts, condition_map, negative_control_sgrnas):
 	warned = False
 
@@ -647,7 +666,7 @@ every map.")
 		allow_reversed_permutations=False,
 			max_null_iterations=2,
 			gene_readcount_total_bin_quantiles=[.05],
-			fdr_method="FDR_TSBH",
+			fdr_method="FDR_TSBH", nepochs=301,
 				**kwargs):
 		'''
 		Generate a table with the significance of differences in gene effect between two conditions.
@@ -681,7 +700,7 @@ every map.")
 			`statistics` (`pd.DataFrame`): A dataframe with the columns:
 				`cell_line_name`: the cell line name from `condition_map`
 				`gene`: the gene from `guide_gene_map`
-				`gene_effect_nondistinguished`: the Chronos-estimated gene effect found by treating sequences 
+				`gene_effect_undistinguished`: the Chronos-estimated gene effect found by treating sequences 
 					of the same cell line in every condition as a replicate, i.e. not distinguishing on 
 					condition.
 				`gene_effect_in_<condition1>`, `gene_effect_in_<condition2>`: Chronos estimates of the gene 
@@ -694,7 +713,7 @@ every map.")
 				`permuted_difference_extreme`: the maximal absolute difference seen between conditions over the
 					the different permutations.
 				`observed_statistic`: the value calculated by applying `comparison_statistic` to the
-					`comparison_effect`s in the nondistinguished, condition1, and condition2 cases.
+					`comparison_effect`s in the undistinguished, condition1, and condition2 cases.
 				`pval`: the empirical p-value that the observed statistic did not arise from the distribution of
 					statistics seen with the permuted condition labels.
 				`FDR`: Benjamini-Hochberg estimate from the `pval` distribution (within readcount bins)
@@ -704,18 +723,18 @@ every map.")
 
 		condition_pair = self._check_condition_pair(condition_pair)
 
-		self.nondistinguished_map = {key: filter_sequence_map_by_condition(
+		self.undistinguished_map = {key: filter_sequence_map_by_condition(
 			self.condition_map[key], condition_pair)
 			for key in self.keys
 		}
-		for val in self.nondistinguished_map.values():
+		for val in self.undistinguished_map.values():
 			val["true_cell_line_name"] = val["cell_line_name"].copy()
 
 		self.retained_readcounts = {
-			key:self.readcounts[key].loc[self.nondistinguished_map[key].sequence_ID]
+			key:self.readcounts[key].loc[self.undistinguished_map[key].sequence_ID]
 			for key in self.keys
 		}
-		self.compared_lines = sorted(set.union(*[set(v.cell_line_name) for v in self.nondistinguished_map.values()]))
+		self.compared_lines = sorted(set.union(*[set(v.cell_line_name) for v in self.undistinguished_map.values()]))
 		self.compared_lines.remove("pDNA")
 
 		self.readcount_gene_totals = self.get_readcount_gene_totals(
@@ -724,21 +743,21 @@ every map.")
 
 		print("training model without conditions distinguished")
 		self.undistinguished_likelihood = self.get_undistinguished_results(
-			self.nondistinguished_map, **kwargs
+			self.undistinguished_map, nepochs, **kwargs
 		)
 
 		print("training model with conditions distinguished")
 		self.distinguished_map, self.distinguished_likelihood, \
 			distinguished_gene_effect = self.get_distinguished_results(
-			self.nondistinguished_map, condition_pair,
+			self.undistinguished_map, condition_pair, nepochs, 
 			 **kwargs
 		)
 
 		print("training models with permuted conditions")
 		self.permuted_maps, self.permuted_likelihoods, \
 			permuted_gene_effects = self.get_permuted_results(
-			max_null_iterations, self.nondistinguished_map, condition_pair, 
-			allow_reversed_permutations,
+			max_null_iterations, self.undistinguished_map, condition_pair, 
+			allow_reversed_permutations, nepochs, 
 			**kwargs
 		)
 
@@ -845,19 +864,19 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 		return readcount_gene_totals
 
 
-	def get_undistinguished_results(self, nondistinguished_map, **kwargs):
+	def get_undistinguished_results(self, undistinguished_map, nepochs, **kwargs):
 		undistinguished_model = Chronos(
 			readcounts=self.retained_readcounts,
-			sequence_map=nondistinguished_map,
+			sequence_map=undistinguished_map,
 			guide_gene_map=self.guide_gene_map,
 			negative_control_sgrnas=self.negative_control_sgrnas,
 			 use_line_mean_as_reference=np.inf,
 			 print_to=self.print_to,
 			**self.kwargs
 		)
-		undistinguished_model.train(**kwargs)
+		undistinguished_model.train(nepochs, **kwargs)
 		undistinguished_model.save(".chronos_compare_undistinguished_model", overwrite=True)
-		likelihood = cell_line_log_likelihood(undistinguished_model, nondistinguished_map)
+		likelihood = cell_line_log_likelihood(undistinguished_model, undistinguished_map)
 		if self.keep_models:
 			self.undistinguished_model = undistinguished_model
 		else:
@@ -865,12 +884,12 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 		return likelihood
 
 
-	def get_distinguished_results(self, nondistinguished_map, condition_pair,
-			 **kwargs
+	def get_distinguished_results(self, undistinguished_map, condition_pair,
+			 nepochs, **kwargs
 		):
 
 		distinguished_map = {key:
-			create_condition_sequence_map(nondistinguished_map[key], condition_pair)
+			create_condition_sequence_map(undistinguished_map[key], condition_pair)
 			for key in self.keys}
 
 
@@ -881,11 +900,18 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 			negative_control_sgrnas=self.negative_control_sgrnas,
 			 use_line_mean_as_reference=np.inf,
 			 pretrained=True,
+			 constrained_mean=True,
 			 print_to=self.print_to,
 			**self.kwargs
 		)
 		distinguished_model.import_model(".chronos_compare_undistinguished_model")
-		distinguished_model.train(**kwargs)
+		growth_rate = pd.read_csv(".chronos_compare_undistinguished_model/growth_rate.csv")
+
+		growth_rate = _remap_growth_rates(growth_rate, undistinguished_map,
+			distinguished_map)
+
+		distinguished_model.growth_rate = growth_rate
+		distinguished_model.train(nepochs, ge_only=nepochs, **kwargs)
 
 		distinguished_gene_effect = distinguished_model.gene_effect
 		distinguished_likelihood = cell_line_log_likelihood(distinguished_model, distinguished_map)
@@ -897,12 +923,12 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 		return distinguished_map, distinguished_likelihood, distinguished_gene_effect
 
 
-	def get_permuted_results(self, max_null_iterations, nondistinguished_map, condition_pair, 
-			allow_reversed_permutations, **kwargs
+	def get_permuted_results(self, max_null_iterations, undistinguished_map, condition_pair, 
+			allow_reversed_permutations, nepochs, **kwargs
 		):
 
 		permuted_maps = {
-			key: create_permuted_sequence_maps(nondistinguished_map[key], condition_pair, 
+			key: create_permuted_sequence_maps(undistinguished_map[key], condition_pair, 
 												allow_reversed_permutations)
 			for key in self.keys
 		}
@@ -921,11 +947,17 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 								 negative_control_sgrnas=self.negative_control_sgrnas,
 								  use_line_mean_as_reference=np.inf,
 								  pretrained=True,
+								  constrained_mean=True,
 								  print_to=self.print_to,
 								**self.kwargs
 								)
 			permuted_model.import_model(".chronos_compare_undistinguished_model")
-			permuted_model.train(**kwargs)
+
+			growth_rate = pd.read_csv(".chronos_compare_undistinguished_model/growth_rate.csv")
+			permuted_model.growth_rate = _remap_growth_rates(growth_rate, undistinguished_map,
+				permuted_map)
+
+			permuted_model.train(nepochs, ge_only=nepochs, **kwargs)
 
 			out.append(cell_line_log_likelihood(permuted_model, permuted_map))
 			permuted_gene_effects.append(permuted_model.gene_effect)
@@ -1025,6 +1057,15 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 				out[-1].reset_index(inplace=True)
 				out[-1].rename(columns={out[-1].columns[0]: "gene"})
 		return pd.concat(out, ignore_index=True)
+
+
+	def __del__(self):
+		try:
+			del self.undistinguished_model, self.distinguished_model
+			for model in list(self.permuted_models):
+				del model
+		except AttributeError:
+			pass
 
 
 def get_consensus_difference_statistics(comparison_statistics):

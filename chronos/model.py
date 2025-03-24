@@ -729,6 +729,7 @@ class Chronos(object):
 				 growth_rate_reg=0.01,
 				 smart_init=True,
 				 pretrained=False,
+				 constrained_mean=False,
 				 replicate_efficacy_guide_quantile=0.02,
 				 initial_screen_delay=3,
 				 scale_cost=0.67,
@@ -787,7 +788,12 @@ class Chronos(object):
 			smart_init (`bool`): if True (default) the model initializes cell efficacy and gene effect by using estimates
 				based on the fold change of the latest available time points. If this parameter is False, cell_line_efficacy
 				will be 1 for all cell lines!
-			pretrained (`bool`): whether the model is being initialized from a pretrained state using orthogonal data.
+			pretrained (`bool`): whether the model will use paramters from a pretrained state using other data.
+				If true, once initialized, parameters must be loaded from a saved model directory with `import_model`
+				brefore training, and training will be restricted to update only `gene_effect` and `growth_rate`
+				estimates.
+			constrained_mean (`bool`): if `pretrained` and True, the mean gene effect will not be updated during training.
+				If True and not `pretrained`, will raise error.
 			replicate_efficacy_guide_quantile (`float`): quantile of guides to use to estimate replicate efficacy. Between 0 and 0.5.
 			initial_screen_delay (`float`): how long after infection before growth phenotype kicks in, in days. If there are fewer than
 								3 late timepoints this initial value will be left unchanged.
@@ -959,6 +965,9 @@ class Chronos(object):
 		self._measured_t0, self._pdna_scale = self._get_tf_measured_t0(readcounts, sequence_map, dtype)
 
 		self._pretrained = pretrained
+		self.constrained_mean = constrained_mean
+		if (self.constrained_mean and not self._pretrained):
+			raise ValueError("If `pretrained` is False, `constrained_mean` must be false")
 		self._is_model_loaded = False
 		
 
@@ -1731,7 +1740,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 			with tf.compat.v1.name_scope("residue"):
 				v_residue = tf.Variable(gene_effect_est, dtype=dtype, name='base') 
 				_residue = tf.multiply(v_residue, self._gene_effect_mask, name="masked_base")
-				if self._pretrained:
+				if self._pretrained and not self.constrained_mean:
 					_true_residue = _residue
 				else:
 					_true_residue =  tf.subtract(
@@ -2882,6 +2891,8 @@ your data" % missing
 	@growth_rate.setter
 	def growth_rate(self, desired_growth_rate):
 		#default format saved to directory
+		if ("replicate_ID") in desired_growth_rate:
+			desired_growth_rate = desired_growth_rate.set_index("replicate_ID")
 		if "library" in desired_growth_rate:
 			desired_growth_rate = dict([ (library, growth_rate["growth_rate"])
 				for library, growth_rate in desired_growth_rate.groupby("library")
