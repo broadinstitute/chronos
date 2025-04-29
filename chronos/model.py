@@ -1416,6 +1416,8 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 						readcounts[key], negative_control_sgrnas[key], sequence_map[key],
 						use_line_mean_as_reference=use_line_mean_as_reference
 					)[self.sequence_index[key]]
+				if excess_variance[key].isnull().any():
+					raise ValueError(f"nulls found in estimated excess variance for {key}")
 			elif not key in excess_variance:
 				try:
 					excess_variance[key] = pd.Series(prior_variance, index=self.sequence_index[key])
@@ -2224,12 +2226,6 @@ guide abundance"
 			min_predicted_readcounts = self.sess.run(self._predicted_readcounts[key], self.run_dict).min().min()
 			if min_predicted_readcounts < 0:
 				raise ValueError("Negative predicted normalized reads (predicted_readcounts) found (%f)" % min_predicted_readcounts)
-			
-			self.printer.print("\t" + key + " _excess_variance")
-			if np.sum(pd.isnull(self.excess_variance[key])) > 0:
-				raise ValueError("nulls found in excess_variance:\n%r" %
-					self.excess_variance[key][self.excess_variance[key].isnull()]
-				)
 
 			self.printer.print('\t' + key + ' _cost_presum')
 			df = pd.DataFrame(
