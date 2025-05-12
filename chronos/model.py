@@ -2410,7 +2410,7 @@ guide abundance"
 
 #########################               I  /  O              ###################################           
 				
-	def load(self, gene_effect, guide_efficacy, t0_offset, screen_delay, replicate_efficacy, 
+	def load(self, gene_effect, guide_efficacy, t0_offset, screen_delay, 
 		library_effect):
 		'''
 		Load a pretrained model. Designed to be called by `import_model`
@@ -2474,7 +2474,7 @@ your data" % missing
 		dir_files = os.listdir(directory)       
 		for filename in [
 			'guide_efficacy.csv', "t0_offset.csv",
-			'replicate_efficacy.csv', 'library_effect.csv'
+			'library_effect.csv'
 		]:
 			assert filename in dir_files,"Cannot locate file {} in target directory {}".format(filename, directory)
 		try:
@@ -2494,7 +2494,6 @@ your data" % missing
 			index_col=0)["efficacy"]
 		t0_offset = pd.read_csv(os.path.join(directory, 't0_offset.csv'), 
 			index_col=0)
-		replicate_efficacy = pd.read_csv(os.path.join(directory, 'replicate_efficacy.csv'), index_col=0)
 		if "screen_delay.csv" in dir_files:
 			screen_delay = pd.read_csv(os.path.join(directory, 'screen_delay.csv'), 
 				index_col=0)["screen_delay"]
@@ -2502,7 +2501,7 @@ your data" % missing
 			screen_delay = pd.Series(3, index=gene_effect.columns)
 		library_effect = pd.read_csv(os.path.join(directory, 'library_effect.csv'), index_col=0)        
 
-		self.load(gene_effect, guide_efficacy, t0_offset, screen_delay, replicate_efficacy, library_effect)
+		self.load(gene_effect, guide_efficacy, t0_offset, screen_delay, library_effect)
 		   
 		
 
