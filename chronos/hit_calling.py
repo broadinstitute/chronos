@@ -297,7 +297,7 @@ in `condition_pair`: %r/n/n%r" % (condition_pair, condition_map))
 					.query("condition in %r" % list(condition_pair))\
 					.query("cell_line_name != 'pDNA'")\
 					.groupby(["cell_line_name", "condition"])\
-					.sequence_ID\
+					.replicate\
 					.nunique()
 	if (replicate_counts < 2).all():
 		raise ValueError("No cell lines in `condition_map` had at least 2 replicates in both conditions \

@@ -4,6 +4,8 @@ A full description and benchmarking of Chronos 1 are available in a publication:
 
 An additional preprint describing the changes made to Chronos 2 will be released when the underlying data is public, expected 2024.
 
+NEW IN 2.3: The Chronos hit-calling module now allows you to assess significance and control false discovery. See details in the preprint: https://doi.org/10.1101/2025.04.24.650434. Examples are given in Vignette.py.
+
 # When to use it
 Chronos is well suited for any CRISPR KO experiment where:
 - You measured initial pDNA sgRNA readcounts and readcounts at one or more later time points.
@@ -68,6 +70,7 @@ You can then initialize the Chronos model
         negative_control_sgrnas={'my_library': negative_control_sgrnas}
     )
 
+
 This odd syntax is used because it allows you to process results from different libraries at the same time. If you have libraries 1 and 2, and readcounts, sequence maps, guide maps, and negative control sgRNAs for them, you would initialize Chronos as such:
 
     model = chronos.Chronos(
@@ -105,8 +108,57 @@ The copy number matrix needs to be aligned to the gene_effect_matrix. Additional
 
 New functionality in Chronos 2.x includes two types of quality control reports, one you can run on your raw data, the other on the trained Chronos results, and the ability to load DepMap public Chronos runs and use the trained parameters for processing your own screens (if they are in a public DepMap library, currently just Avana and KY). See the vignette for details on how to do this.
 
+# Calling hits
+
+New functionality in Chronos 2.3.x includes the `hit_calling` module, which allows you to assess the statistical significance of Chronos results. See the preprint for a detailed explanation and benchmarking of the methods: https://doi.org/10.1101/2025.04.24.650434
+
+## Identify significantly depleting knockouts
+To get empirical p-values that a gene knockout causes a true negative viability phenotype (requires a list of many negative control genes) from a gene effect matrix (which can be supplied by Chronos or any other algorithm, as long as negatve = more dependent):
+
+    from chronos.hit_calling import get_pvalue_dependent, get_fdr_from_pvalues
+    pvalues = get_pvalue_dependent(gene_effect, negative_control_genes)
+    fdr_from_pvalues = get_fdr_from_pvalues(pvalues)
+
+`hit_calling` also includes an empirical Bayesian method for controlling false discovery. This method generates posterior probabilities that a given gene effect score was generated from the distribution of positive control genes rather than the negative control genes - i.e., the probability that the cell line is dependent on the gene. 
+
+    from chronos.hit_calling import get_probability_dependent, get_fdr_from_probability
+    probabilities = get_probability_dependent(gene_effect, negative_control_genes, positive_control_genes)
+    fdr_from_probabilities = get_fdr_from_probabilities(probabilities)
+
+DepMap published `fdr_from_probabilities` every quarter as CRISPRGeneDependency. This method is generally preferable over the frequentist version since it is better-calibrated and produces good results even with relatively few controls (on the order of 10s), but it does require a good set of positive controls that represent the full range of expected dependent phenotypes. If you only include highly lethal knockouts in your positive control set, you should expect to be limited in detecting less extreme loss of viability phenotypes in other knockouts.
+
+## Comparing gene effect between two screening conditions
+
+A common experimental design involves running a CRISPR screen with the same library on the same cell line multiple times with some experimental condition changed - such as in the presence or absence of a drug, an isogenic perturbation, or a different growth condition. The `hit_calling.ConditionComparison` will report p-values for differences of viabiliy effects between any two conditions in such an experiment, *provided* you have at least two independent biological replicates for your condition. Initializing `ConditionComparison` is almost exactly the same as initializing a `Chronos` instance, except that instead of a `sequence_map`, you must provide a `condition_map` which has all of the same columns as `sequence_map`, plus a `replicate` column and a `condition` column. The `condition` column tells Chronos which replicates belong to which condition; you can choose any labels you like. The `replicate` column tells Chronos which late time points are different sequencing results of the same biological replicate. If you only have one late timepoint for each biological replicate, you can fill this column with any labels as long as they are unique to each row. `condition` and `replicate` for rows with `cell_line_name == "pDNA"` will be ignored. 
+
+    from chronos.hit_calling import ConditionComparison
+    comparator = ConditionComparison(
+        readcounts={"my_library": my_readcounts},
+        condition_map={"my_library": my_condition_map},
+        guide_gene_map={"my_library": my_guide_map},
+        negative_control_sgrnas={"my_library": my_negative_controls}
+    )
+
+You can also pass `negative_control_genes` instead of `negative_control_sgrnas`, and in fact this is recommended. If you do, you only pass one list rather than a dict of entries per library:
+
+    comparator = ConditionComparison(
+        readcounts={"my_library": my_readcounts},
+        condition_map={"my_library": my_condition_map},
+        guide_gene_map={"my_library": my_guide_map},
+        negative_control_genes=my_negative_control_genes
+    )
+
+To compare screens in DrugA to screens in Control, you would call 
+
+    drugA_vs_control_statistics = comparator.compare_conditions(conditions=("Control", "DrugA"))
+
+Of course, the two conditions named in `compare_conditions` must be present in `condition_map["condition"]`. 
+
+Running `compare_conditions` requires Chronos to build and train at least four models, so expect this to take longer than a typical Chronos run. It will also be less verbose by default. Problems can arise when the "biological replicates" are not genuinely independent replicates - for example, if a single pool of cells was infected with the CRISPR library, then split into replicates, we've observed that even knockouts with no viability effects will be more correlated with their coinfected partners than with other replicates. Chronos will try to check for this and do its best to report and correct for problems.
+
+
 # Expected run times
-The full Achilles dataset takes 3-4 hours to run a gcloud VM with 52 GB of memory. Training the vignette in this package should take around 2 minutes on a typical laptop.
+The full Achilles dataset takes 3-4 hours to run a gcloud VM with 52 GB of memory. Training the vignette in this package should take around 10 minutes on a typical laptop.
 
 # Other Chronos Options
 The Chronos model has a large number of hyperparameters which are described in the model code. Generally we advise against changing these. We've tested them in a wide variety of experimental settings and found the defaults work well. However, a few may be worth tweaking if you want to try and maximize performance. If you do choose to tune the hyperparameters, make sure you evaluate the results with a metric that captures what you really want to get out of the data. We decribe the hyperparameters that might be worth changing here.

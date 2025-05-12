@@ -279,11 +279,18 @@ def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_li
 	if not index is None:
 		index = index[mask]
 
-	if c is "density" or outliers_from == "density":
+	c_is_density = False
+	if isinstance(c, str):
+		if c == "density":
+			c_is_density = True
+		else:
+			raise ValueError(f"if passed, `c` can't be {c}, only 'density' or iterable.")
+
+	if c_is_density or outliers_from == "density":
 		z = get_density(x, y, bins)
 		z = np.sqrt(z)
 
-	if c is "density":
+	if c_is_density:
 		c = z
 		if cbar_label is None:
 			cbar_label = "Density (sqrt)"
@@ -294,7 +301,6 @@ def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_li
 		x, y, c = x[idx], y[idx], c[idx]
 		if not index is None:
 			index = index[idx]
-		if c is "density" or outliers_from == "density":
 			z = z[idx]
 
 	im = ax.scatter( x, y, c=c, **kwargs )
