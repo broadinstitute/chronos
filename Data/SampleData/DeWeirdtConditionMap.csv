@@ -1,0 +1,10 @@
+sequence_ID,replicate,cell_line_name,days,pDNA_batch,condition
+pDNA,pDNA,pDNA,21,batch1,pDNA
+Meljuso,RepA,Meljuso,21,batch1,Control
+Meljuso.1,RepB,Meljuso,21,batch1,Control
+Meljuso.2,RepA,Meljuso,21,batch1,A-1331852
+Meljuso.3,RepB,Meljuso,21,batch1,A-1331852
+OVCAR8,RepA,OVCAR8,21,batch1,Control
+OVCAR8.1,RepB,OVCAR8,21,batch1,Control
+OVCAR8.2,RepA,OVCAR8,21,batch1,A-1331852
+OVCAR8.3,RepB,OVCAR8,21,batch1,A-1331852

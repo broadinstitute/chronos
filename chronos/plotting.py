@@ -5,6 +5,7 @@ from warnings import warn
 
 from matplotlib import pyplot as plt
 from matplotlib import cm
+from matplotlib import colormaps
 from matplotlib.ticker import FormatStrFormatter
 from matplotlib.colors import Normalize, LogNorm
 from matplotlib.cm import ScalarMappable
@@ -20,7 +21,7 @@ except:
 	adjust_text_present = False
 
 
-def lowess_trend(x, y, frac=.25, max_points=300, min_points=20, delta_frac=.005, **kwargs):
+def lowess_trend(x, y, frac=.25, max_points=2000, min_points=50, delta_frac=.01, **kwargs):
 	'''
 	A wrapper for statsmodel's lowess with a somewhat more useful parameterization
 	Parameters:
@@ -38,6 +39,7 @@ def lowess_trend(x, y, frac=.25, max_points=300, min_points=20, delta_frac=.005,
 	'''
 	frac = min(max_points/len(x), frac)
 	frac = max(frac, min_points/len(x))
+	frac = np.clip(frac, 0, 1)
 	rng = x.max() - x.min()
 	delta = min(delta_frac * rng, 50/len(x)*rng)
 	delta = min(delta, rng)
@@ -156,6 +158,29 @@ def identify_outliers_1d(x, n_outliers):
 	return order[-n_outliers:]
 
 
+def get_density(x, y, bins=50):
+	'''
+	get the 2D density of the 1D arrays `x` and `y` using a histogram with n `bins`
+	on each axis
+	'''
+	try:
+		data , x_e, y_e = np.histogram2d( x, y, bins = bins, density = True )
+	except ValueError as e:
+		print(x)
+		print(y)
+		print(bins)
+		raise e
+	z =  interpn( ( 0.5*(x_e[1:] + x_e[:-1]) , 0.5*(y_e[1:]+y_e[:-1]) ) , 
+			data , np.vstack([x,y]).T , 
+			method = "splinef2d", bounds_error = False
+	)
+
+	#NaNs should have zero density
+	z[np.where(np.isnan(z))] = 0.0
+	z[z < 0] = 0
+	return z
+
+
 def dict_plot(dictionary, plot_func, figure_width=7.5, min_subplot_width=3.74,
 			  aspect_ratio=.8, aliases={}, xlabel=None, ylabel=None, *args, **kwargs):
 	'''
@@ -200,8 +225,11 @@ def dict_plot(dictionary, plot_func, figure_width=7.5, min_subplot_width=3.74,
 	return fig, axes
 
 
+
+
 def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_line_args=dict(color='r'),
 	lowess_args={}, diagonal=False, diagonal_kws=dict(color='black', lw=.3, linestyle='--'), 
+	c="density", cbar_label=None,
 	label_specific=[], label_outliers=0, outliers_from='trend', label_kws=dict(
 					fontsize=8, color=(.3, 0, 0), 
 					path_effects=[pe.withStroke(linewidth=-2, foreground=(1, 1, 1))]
@@ -219,6 +247,8 @@ def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_li
 		`trend_line` (`bool`): Whether to draw a lowess trend_line line
 		`lowess_args` (`dict`): passed to `lowess_trend` for the trend_line line
 		`trend_line_args` (`dict`): passed to `pyplot.plot` for the trend_line line
+		`c` ("density" or array): if "density", points will be colored by the square root of point density in the plot.
+			Otherwise, passed to `pyplot.scatter`.
 		`diagonal` (`bool`): If true, draw a line on the diagonal
 		`diagonal_kws` (`dict`): Passed to `pyplot.plot`. By default, colors diagonal line red
 		`label_outliers` (`int`): if > 0, the number of outliers to label with their index. 
@@ -248,37 +278,33 @@ def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_li
 	y = np.array(y[mask]).astype(float)
 	if not index is None:
 		index = index[mask]
-	try:
-		data , x_e, y_e = np.histogram2d( x, y, bins = bins, density = True )
-	except ValueError as e:
-		print(x)
-		print(y)
-		print(bins)
-		raise e
-	z =  interpn( ( 0.5*(x_e[1:] + x_e[:-1]) , 0.5*(y_e[1:]+y_e[:-1]) ) , 
-			data , np.vstack([x,y]).T , 
-			method = "splinef2d", bounds_error = False
-	)
 
-	#To be sure to plot all data
-	z[np.where(np.isnan(z))] = 0.0
-	z[z < 0] = 0
-	z = np.sqrt(z)
+	if c is "density" or outliers_from == "density":
+		z = get_density(x, y, bins)
+		z = np.sqrt(z)
 
-	# Sort the points by density, so that the densest points are plotted last
+	if c is "density":
+		c = z
+		if cbar_label is None:
+			cbar_label = "Density (sqrt)"
+
+	# Sort the points by c, so that the strongest points are plotted last
 	if sort :
-		idx = z.argsort()
-		x, y, z = x[idx], y[idx], z[idx]
+		idx = c.argsort()
+		x, y, c = x[idx], y[idx], c[idx]
 		if not index is None:
 			index = index[idx]
+		if c is "density" or outliers_from == "density":
+			z = z[idx]
 
-	ax.scatter( x, y, c=z, **kwargs )
+	im = ax.scatter( x, y, c=c, **kwargs )
 
-	norm = Normalize(vmin = np.min(z), vmax = np.max(z))
+	norm = Normalize(vmin = np.min(c), vmax = np.max(c))
 	colormap = cm.ScalarMappable(norm = norm)
 	colormap.set_array([])
+	colormap.set_cmap(im.get_cmap())
 	cbar = fig.colorbar(colormap, ax=ax)
-	cbar.ax.set_ylabel('Density (sqrt)')
+	cbar.ax.set_ylabel(cbar_label)
 
 	smoothed=None
 	if trend_line:
@@ -320,8 +346,7 @@ def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_li
 		label_y = np.array([y[label] for label in label_specific])
 		plt.scatter(label_x, label_y, **outlier_scatter_kws)
 		if adjust_text_present and len(texts) > 0:
-			adjust_text(texts, expand_text=(1.1, 1.5),
-				lim=500,
+			adjust_text(texts, lim=500,
 				arrowprops=dict(arrowstyle="-", color=[.7, .5, .5]),
 				#x=outlier_x, y=outlier_y
 				)
@@ -416,7 +441,7 @@ def binplot(x, y, binned_axis='x', nbins=10, endpoints=None, right=False, ax=Non
 	normer.autoscale(counts.values)
 	cvals = normer(counts.values)
 	if isinstance(colors, str):
-		cmap = cm.get_cmap(colors)
+		cmap = colormaps[colors]
 		colors = [cmap(v) for v in cvals]
 	for box, color in zip(boxes['boxes'], colors):
 		box.set_facecolor(color)
