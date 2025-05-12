@@ -247,6 +247,8 @@ def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_li
 		`trend_line` (`bool`): Whether to draw a lowess trend_line line
 		`lowess_args` (`dict`): passed to `lowess_trend` for the trend_line line
 		`trend_line_args` (`dict`): passed to `pyplot.plot` for the trend_line line
+		`c` ("density" or array): if "density", points will be colored by the square root of point density in the plot.
+			Otherwise, passed to `pyplot.scatter`.
 		`diagonal` (`bool`): If true, draw a line on the diagonal
 		`diagonal_kws` (`dict`): Passed to `pyplot.plot`. By default, colors diagonal line red
 		`label_outliers` (`int`): if > 0, the number of outliers to label with their index. 
