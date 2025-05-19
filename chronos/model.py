@@ -290,7 +290,7 @@ def normalize_readcounts(readcounts, negative_control_sgrnas=None, sequence_map=
 			"if negative_control_sgrnas are supplied, a sequence_map must be as well"
 		)
 	check_inputs(readcounts={'default': readcounts}, sequence_map={'default': sequence_map})
-	logged = pd.DataFrame(np.log2(readcounts+1), 
+	logged = pd.DataFrame(np.log2(readcounts.values.astype(float)+1.0), 
 						   index=readcounts.index, 
 						   columns=readcounts.columns
 						  )
