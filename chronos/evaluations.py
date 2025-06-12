@@ -2,7 +2,6 @@
 from warnings import warn
 import numpy as np
 import pandas as pd
-pd.set_option('future.no_silent_downcasting', True)
 from colorsys import hsv_to_rgb, rgb_to_hsv
 
 try:
