@@ -619,62 +619,62 @@ class Chronos(object):
 	The core matrix is gene effect, which is actually two tensors, a matrix and a per-gene vector of means:
 
 	                 Genes                      Genes
-	  		  _____________________		   __________________
+	           _____________________       __________________
 	  cell    |  Mean-centered           1| Mean gene effect
 	  lines   |  gene effect          +
-              |  (column mean = 0)   
+	          |  (column mean = 0)
 
 	The next step is adding the library effect, then expanding the cell line axis to replicate IDs for that library
 	Different libraries in Chronos are mostly represented as values in a dictionary, rather than indices in a tensor
 	dimension. The exception is _library_effects, which is a matrix to enable normalization across libraries.
 
-	                    replicate                               genes                     genes
-	  		            growth rate                      _____________________	    _________________	   
-	{Library_i:          _1_              \\       cell |  Combined                 i|  Library effects[i]   
-	                     |                        lines |  gene effect          +  
-              replicates |         X          {         |                                                    }
-						 |                //
-						 |
+	                    replicate                               genes                       genes
+	                    growth rate                      _____________________        _________________
+	{Library_i:           _1_             \\       cell |  Combined                 i|  Library effects[i]
+	                     |                        lines |  gene effect          +
+	          replicates |         X          {         |                                                    }
+	                     |                //
+	                     |
 
 	This object, a dict of replicate x gene matrices, is called `_gene_effect_growth`. The next step is multiplying by the
 	effective days, i.e. that number of days from transfection for the sequence minus a per-gene "screen delay"
 	that models the lag between knockout and the onset of a viabiliy phenotype (set to 3 days by default):
-					                       
-	  		           			                                      _days_i               
-	  		                 genes                                                    
-	{Library_i:          ___________                                   _1_                              }
-	                     | _gene       //    \\                       |               genes     
-              replicates | growth         X        clip_0{  sequences |      --    ____________  }
-						 | rate        \\    //                       |          1|_screen_delay
-						 |                                            |          
-   
+
+	                                                                  _days_i
+	                         genes
+	{Library_i:           ___________                                 _1_                              }
+	                     | _gene       //   \\                       |               genes
+	          replicates | growth         X       clip_0{  sequences |      --    ____________  }
+	                     | rate        \\   //                       |          1|_screen_delay
+	                     |                                           |
+
 	This object, a dict of sequences by genes, we'll call gene_growth - it doesn't have a variable assigned.
 	It is used to get the relative change in abundance expected if the KO is perfect.
-                                   
+
 	{library_i:     exp(gene_growth_i) - 1}
 
 	Meanwhile, we take the outer product of the per-replicate and per-guide efficacy:
-                              
-                               _1_        guides
-                              |          _______    
-	{library_i:     replicates|     X  1|            }
-                              |
 
-	This object, a dict pf replicate by guide matrices is _efficacy. It's expanded to the sequence level
+	                           _1_        guides
+	                          |          _______
+	{library_i:     replicates|     X  1|            }
+	                          |
+
+	This object, a dict of replicate by guide matrices is _efficacy. It's expanded to the sequence level
 	and multiplied by gene_growth to get _growth:
 
 
-                                    guides                                   genes
-                                ____________                           ______________       
+	                                guides                                   genes
+	                            ____________                           ______________
 	{library_i:                |                //   \\               |                  }
-	                 replicates| _efficacy_i       X        sequences |  growth_i    
-                               |                \\   //               |
+	                 replicates| _efficacy_i       X        sequences |  growth_i
+	                           |                \\   //               |
 
 	This object, a dict of sequence by guide matrices, is called _change, and represents the expected
 	fold change in abundance for each guide from the initial abundance. But we do not assume the initial
 	measured abundance is correct. We allow for something we call "pDNA error", a systematic departure
 	from the measured departure.
-
+ 
 
                     
 	{library_i      sequences            
@@ -2528,10 +2528,10 @@ your data" % missing
 			'library_effect.csv': the estimated bias for each gene in each library, for genes present in all libraries.
 			't0_offset.csv': the estimated fractional difference in the relative abundance of each sgRNA in each library
 				where present from that reported in the pDNA.
-			'paramdeters.json': the hyperparameters passed to `__init__` when the model was created. Also includes the 
+			'parameters.json': the hyperparameters passed to `__init__` when the model was created. Also includes the 
 				calculated `cost` and `full_cost` for reference.
 		If `include_inputs`:
-			'<library>_readcounts.hdf5': for each library, the matrix of observed readcounts. If Chronos mnormalized 
+			'<library>_readcounts.hdf5': for each library, the matrix of observed readcounts. If Chronos normalized 
 				these, the written version will also be normalized.
 			'<library>_guide_gene_map.csv': for each library, the guide to gene map.
 			'<library>_sequence_map.csv': for each library, the sequence map. The pDNA batch labels will have the library
