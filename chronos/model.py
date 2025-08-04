@@ -1766,6 +1766,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 				gene_overlap_indicator = np.array([s in self.intersecting_genes for s in self.all_genes], 
 					dtype=self.np_dtype).reshape((1, -1))
 				_gene_overlap_indicated = tf.constant(gene_overlap_indicator, dtype=dtype, name="gene_overlap_indicator")
+
 				library_mean_guides = {
 					key: self.guide_gene_map[key]\
 							.query("gene in %r" % list(self.intersecting_genes))
@@ -1775,13 +1776,23 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 							.mean()
 					for key in self.keys
 				}
-				library_mean_guides = {
-					key: val / sum(library_mean_guides.values())
-					for key, val in library_mean_guides.items()
+
+				library_n_lines = {
+					key: self.sequence_map[key]\
+						.cell_line_name\
+						.nunique() - 1
+						for key in self.keys
 				}
+
+				norm = sum([library_mean_guides[key]*library_n_lines[key] for key in self.keys])
+
 				_library_effect_indicated = {key: v * _gene_overlap_indicated for key, v in v_library_effect.items()}
-				_library_effect_mean = tf.add_n([library_mean_guides[key] * _library_effect_indicated[key]
-									 for key in self.keys])
+
+				_library_effect_mean = tf.add_n([
+					library_mean_guides[key] * library_n_lines[key] * _library_effect_indicated[key] / norm
+					for key in self.keys
+				])
+
 				_library_effect = {key: v - _library_effect_mean for key, v in _library_effect_indicated.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
