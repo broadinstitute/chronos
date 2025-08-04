@@ -37,7 +37,7 @@ As of 09/01/2023, `pip install tensorflow` should work on Macs with arm64.
 
 ## Installing Chronos
 
-If you have `pip` installed, you can install Chronos from pyPI with
+If you have `pip` installed, you can install Chronos from PyPI with
 
 `    $ pip install crispr_chronos`
 
@@ -115,7 +115,7 @@ New functionality in Chronos 2.x includes two types of quality control reports, 
 New functionality in Chronos 2.3.x includes the `hit_calling` module, which allows you to assess the statistical significance of Chronos results. See the preprint for a detailed explanation and benchmarking of the methods: https://doi.org/10.1101/2025.04.24.650434
 
 ## Identify significantly depleting knockouts
-To get empirical p-values that a gene knockout causes a true negative viability phenotype (requires a list of many negative control genes) from a gene effect matrix (which can be supplied by Chronos or any other algorithm, as long as negatve = more dependent):
+To get empirical p-values that a gene knockout causes a true negative viability phenotype (requires a list of many negative control genes) from a gene effect matrix (which can be supplied by Chronos or any other algorithm, as long as negative = more dependent):
 
     from chronos.hit_calling import get_pvalue_dependent, get_fdr_from_pvalues
     pvalues = get_pvalue_dependent(gene_effect, negative_control_genes)
