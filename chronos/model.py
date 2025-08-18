@@ -947,7 +947,7 @@ class Chronos(object):
 		#the libraries may cover different genes, so gene effect estimates for a cell line in one
 		#library may not be meaningful if there are no guides. The mask NAs that value for both
 		#optimization and when the model reports values
-		self._gene_effect_mask, self.mask_count = self._get_gene_effect_mask(readcounts, sequence_map, 
+		self._gene_effect_mask, self.mask_count, self.numpy_ge_masks = self._get_gene_effect_mask(readcounts, sequence_map, 
 														guide_gene_map, dtype)
 		#tensor days are multipled by the default_timepoint_scale to reduce the risk of over/underflow
 		self._days = self._get_days(sequence_map, dtype)
@@ -1503,7 +1503,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 		mask_count = combined_mask.sum().sum()
 		combined_mask = combined_mask.astype(self.np_dtype)
 		_gene_effect_mask = tf.constant(combined_mask.values, dtype=dtype, name="GE_mask")
-		return _gene_effect_mask, mask_count
+		return _gene_effect_mask, mask_count, masks
 
 
 
@@ -1734,6 +1734,11 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 		self.printer.print("building gene effect")
 
 		with tf.compat.v1.name_scope("GE"):
+			# gene_effect has two components: a mean effect (1D vector) carrying the mean gene effect
+			# over all cell lines, and a cell-line-specific 
+			# _residue_effect, which is constrained to have mean 0 unless using a pretrained model
+			# because the screens being evaluated with the pretrained model are allowed
+			# to have a different mean from the pretraining
 			gene_effect_est = np.random.uniform(-.0001, .0001, size=(self.nlines, self.ngenes)).astype(self.np_dtype)
 			gene_effect_est = gene_effect_est - gene_effect_est.mean(axis=0).reshape((1, -1))
 			v_mean_effect = tf.Variable(
@@ -1752,9 +1757,14 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 						name="mean_centered"
 						)
 				  
+			# the acctual gene effect of interest
 			_combined_gene_effect = tf.add(v_mean_effect, _true_residue, name="GE")
 
+
+			# library effects
 			with tf.compat.v1.name_scope("library_effect"):
+
+				#base (unconstrained) tensor
 				v_library_effect = {
 					key: tf.Variable(
 						np.zeros((1, self.ngenes)).astype(self.np_dtype),
@@ -1763,33 +1773,52 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 					for key in self.keys}
 
 
-				gene_overlap_indicator = np.array([s in self.intersecting_genes for s in self.all_genes], 
-					dtype=self.np_dtype).reshape((1, -1))
-				_gene_overlap_indicated = tf.constant(gene_overlap_indicator, dtype=dtype, name="gene_overlap_indicator")
+				gene_presence_indicator = {
+					key: (
+							self.numpy_ge_masks[key].mean()[self.all_genes] > .5
+						).values.reshape((1, -1)).astype(self.np_dtype)
+					for key in self.keys
+				}
+
+				_gene_overlap_indicated = {key: tf.constant(val,
+							 dtype=dtype, name="gene_overlap_indicator"
+				) for key, val in gene_presence_indicator.items()}
+
+				# Library effects are constrained to have a *weighted* mean of 0 across libraries.
+				# the weights are the number of guides for each gene in the library x the number of
+				# screens in the library - essentially, the amount of data in the library for the gene.
 
 				library_mean_guides = {
 					key: self.guide_gene_map[key]\
-							.query("gene in %r" % list(self.intersecting_genes))
 							.groupby("gene")\
 							.sgrna\
 							.count()\
-							.mean()
+							.reindex(self.all_genes)\
+							.fillna(0)\
+							.values\
+							.reshape((-1, 1))
 					for key in self.keys
 				}
 
 				library_n_lines = {
 					key: self.sequence_map[key]\
 						.cell_line_name\
-						.nunique() - 1
+						.nunique() - 1 # -1 for pDNA name in cell lines
 						for key in self.keys
 				}
 
-				norm = sum([library_mean_guides[key]*library_n_lines[key] for key in self.keys])
+				library_data_size = {key: library_mean_guides[key]*library_n_lines[key] for key in self.keys}
 
-				_library_effect_indicated = {key: v * _gene_overlap_indicated for key, v in v_library_effect.items()}
+				_library_data_size = {key: tf.constant(val, dtype=dtype, name="library_data_size_%s" % key)
+										for key, val in library_data_size.items()
+										}
 
+				_library_effect_indicated = {key: v * _gene_overlap_indicated[key] for key, v in v_library_effect.items()}
+
+				# clip the denominator to avoid divide by zero
 				_library_effect_mean = tf.add_n([
-					library_mean_guides[key] * library_n_lines[key] * _library_effect_indicated[key] / norm
+					   library_mean_guides[key] * library_n_lines[key] * _library_effect_indicated[key] 
+					/ tf.clip_by_value(_library_data_size[key], 1, 1e6)
 					for key in self.keys
 				])
 
