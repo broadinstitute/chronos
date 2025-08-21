@@ -998,7 +998,7 @@ class Chronos(object):
 		# _combined_gene_effect is the sum of v_mean_effect and _true_residue. This is the tensor 
 		# accessed by the attribute Chronos.gene_effect.
 		(self.v_mean_effect, self.v_residue, self._residue, self._true_residue, 
-			self._combined_gene_effect, self.v_library_effect, self._library_effect
+			self._combined_gene_effect, self.v_library_effect, self._library_effect, self._library_data_size
 		) = self._get_tf_gene_effect(dtype)
 
 
@@ -1042,7 +1042,7 @@ class Chronos(object):
 		)
 
 		self._library_means, self._library_batch_cost = self._get_library_batch_reg(
-			self._true_residue, self.library_batch_reg, dtype
+			self._true_residue, self.library_batch_reg, self.numpy_ge_masks, dtype
 		)
 
 		self.run_dict.update({self._scale: 1.0})
@@ -1780,7 +1780,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 					for key in self.keys
 				}
 
-				_gene_overlap_indicated = {key: tf.constant(val,
+				_gene_presence_indicated = {key: tf.constant(val,
 							 dtype=dtype, name="gene_overlap_indicator"
 				) for key, val in gene_presence_indicator.items()}
 
@@ -1788,7 +1788,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 				# the weights are the number of guides for each gene in the library x the number of
 				# screens in the library - essentially, the amount of data in the library for the gene.
 
-				library_mean_guides = {
+				library_n_guides = {
 					key: self.guide_gene_map[key]\
 							.groupby("gene")\
 							.sgrna\
@@ -1796,7 +1796,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 							.reindex(self.all_genes)\
 							.fillna(0)\
 							.values\
-							.reshape((-1, 1))
+							.reshape((1, -1))
 					for key in self.keys
 				}
 
@@ -1807,22 +1807,25 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 						for key in self.keys
 				}
 
-				library_data_size = {key: library_mean_guides[key]*library_n_lines[key] for key in self.keys}
+				library_data_size = {key: library_n_guides[key]*library_n_lines[key] for key in self.keys}
+
 
 				_library_data_size = {key: tf.constant(val, dtype=dtype, name="library_data_size_%s" % key)
 										for key, val in library_data_size.items()
 										}
 
-				_library_effect_indicated = {key: v * _gene_overlap_indicated[key] for key, v in v_library_effect.items()}
+				_library_data_total_size = tf.constant(
+					sum([val for val in library_data_size.values()]),
+					 dtype=dtype, name="library_data_size_summed"
+				)
 
-				# clip the denominator to avoid divide by zero
+				#_library_effect_indicated = {key: v * _gene_presence_indicated[key] for key, v in v_library_effect.items()}
 				_library_effect_mean = tf.add_n([
-					   library_mean_guides[key] * library_n_lines[key] * _library_effect_indicated[key] 
-					/ tf.clip_by_value(_library_data_size[key], 1, 1e6)
+					   _library_data_size[key] * v_library_effect[key] 
 					for key in self.keys
-				])
+				]) / _library_data_total_size
 
-				_library_effect = {key: v - _library_effect_mean for key, v in _library_effect_indicated.items()}
+				_library_effect = {key: v - _library_effect_mean for key, v in v_library_effect.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
 
@@ -1830,7 +1833,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 
 
 		return v_mean_effect, v_residue, _residue, _true_residue, _combined_gene_effect, \
-				v_library_effect, _library_effect
+				v_library_effect, _library_effect, _library_data_size
 
 
 #############################    C  O  R  E      M  O  D  E  L    ##############################
@@ -1986,26 +1989,33 @@ guide abundance"
 		return _guide_reg_cost
 
 
-	def _get_library_batch_reg(self, _gene_effect, library_reg, dtype):
+	def _get_library_batch_reg(self, _gene_effect, library_reg, numpy_ge_masks, dtype):
 		group_indicators = {}
 		with tf.compat.v1.name_scope("library_batch_reg"):
-			for key, group in self.cells.items():
-				group_indicator = pd.Series(np.ones(len(group)),
-									index=group
-					).reindex(self.all_cells).fillna(0).astype(self.np_dtype)
 
-				group_indicators[key] = group_indicator
+			_library_masks = {key: tf.constant(val.values.astype(self.np_dtype), dtype, name="library_mask_%s" % key)
+									for key, val in numpy_ge_masks.items()}
 
-			_group_indicators = {key: tf.constant(val.values.reshape((-1, 1)), dtype, name="group_indicator_%s" % key)
-									for key, val in group_indicators.items()}
-			_indicator_product = {key: tf.multiply(val, _gene_effect, name="indicator_product_%s" % key) for key, val in _group_indicators.items()}
+			_library_mask_sums = {key: tf.constant(
+				val.values.astype(self.np_dtype).sum().clip(1, 1e6).reshape((1, -1)), 
+				dtype, 
+				name="library_mask_sum_%s" % key
+			) for key, val in numpy_ge_masks.items()}
 
-			_library_means = {key: tf.reduce_sum(val, axis=0, name="library_effect_sum")[tf.newaxis, :] / group_indicators[key].sum()
-								for key, val in _indicator_product.items()}
+			_indicator_product = {key: tf.multiply(
+				val, _gene_effect, name="library_mask_product_%s" % key
+			) for key, val in _library_masks.items()}
+
+			_library_means = {key: tf.reduce_sum(
+					val, axis=0, name="library_effect_sum"
+				)[tf.newaxis, :] / _library_mask_sums[key]
+				for key, val in _indicator_product.items()
+			}
 
 			_library_reg = tf.add_n([
 				library_reg * tf.reduce_mean(_library_means[key]**2, name="squared_means")
-				for key in self.keys], name="library_reg")
+				for key in self.keys
+			], name="library_reg")
 
 		return _library_means, _library_reg
 
