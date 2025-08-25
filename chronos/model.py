@@ -1825,7 +1825,10 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 					for key in self.keys
 				]) / _library_data_total_size
 
-				_library_effect = {key: v - _library_effect_mean for key, v in v_library_effect.items()}
+				if self._pretrained:
+					_library_effect = _library_effect_indicated
+				else:
+					_library_effect = {key: v - _library_effect_mean for key, v in _library_effect_indicated.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
 
