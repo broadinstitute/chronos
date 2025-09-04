@@ -230,11 +230,13 @@ def dict_plot(dictionary, plot_func, figure_width=7.5, min_subplot_width=3.74,
 def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_line_args=dict(color='r'),
 	lowess_args={}, diagonal=False, diagonal_kws=dict(color='black', lw=.3, linestyle='--'), 
 	c="density", cbar_label=None,
-	label_specific=[], label_outliers=0, outliers_from='trend', label_kws=dict(
+	label_specific=[], label_outliers=0, outliers_from='trend', 
+	label_kws=dict(
 					fontsize=8, color=(.3, 0, 0), 
-					path_effects=[pe.withStroke(linewidth=-2, foreground=(1, 1, 1))]
-					), 
-	outlier_scatter_kws=dict(color=(.8, .2, .1), s=10, linewidth=.6, edgecolor=[0, 0, 0]), **kwargs ):
+					path_effects=[pe.withStroke(linewidth=1.25, foreground=(1, 1, 1))]
+	), 
+	outlier_scatter_kws=dict(color=(.8, .2, .1), s=10, linewidth=.6, edgecolor=[0, 0, 0]), 
+	adjust_text_kws={}, **kwargs ):
 	"""
 	Adapted from Guillaume's answer at
 	 https://stackoverflow.com/questions/20105364/how-can-i-make-a-scatter-plot-colored-by-density-in-matplotlib
@@ -301,7 +303,8 @@ def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_li
 		x, y, c = x[idx], y[idx], c[idx]
 		if not index is None:
 			index = index[idx]
-			z = z[idx]
+			if c_is_density:
+				z = z[idx]
 
 	im = ax.scatter( x, y, c=c, **kwargs )
 
@@ -345,17 +348,33 @@ def density_scatter(x, y, ax=None, sort=True, bins=50, trend_line=True, trend_li
 		labels = index[label_specific]
 	else:
 		labels = label_specific
+
 	if len(label_specific):
-		texts = [plt.text(s=labels[i], x=x[val], y=y[val], **label_kws)
-				for i, val in enumerate(label_specific)]
+
 		label_x = np.array([x[label] for label in label_specific])
 		label_y = np.array([y[label] for label in label_specific])
 		plt.scatter(label_x, label_y, **outlier_scatter_kws)
+
+		#prevent overlapping point text labels from failing to differentiate with adjust_text
+		label_x_jittered = label_x + np.random.normal(size=len(label_x), scale=.05*(x.max() - x.min()))
+		label_y_jittered = label_y + np.random.normal(size=len(label_y), scale=.05*(y.max() - y.min()))
+		texts = [plt.text(s=labels[i], x=label_x_jittered[i], y=label_y_jittered[i], zorder=10, **label_kws)
+				for i, val in enumerate(label_specific)]
+
 		if adjust_text_present and len(texts) > 0:
-			adjust_text(texts, lim=500,
+
+			base_adjust_text_kws = dict(
+				lim=500,
+				target_x=label_x, target_y=label_y,
 				arrowprops=dict(arrowstyle="-", color=[.7, .5, .5]),
-				#x=outlier_x, y=outlier_y
-				)
+				expand=(1.2, 1.4),
+				force_explode=(.3, .5),
+				avoid_self=True
+
+			)
+			base_adjust_text_kws.update(adjust_text_kws)
+			adjust_text(texts, **base_adjust_text_kws)
+
 		elif len(texts) > 0:
 			warn("adjustText not found. Install to have labels moved off points.")
 
