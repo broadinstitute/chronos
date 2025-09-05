@@ -413,8 +413,8 @@ batches, too few to estimate overdispersion. Try passing a specific manual value
 
 	return alpha
 
-def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, gap_cutoff=2,
-				  rpm_normalize=False):
+def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=1.5, gap_cutoff=1.5,
+				  rpm_normalize=False, print_to="stdout"):
 	'''
 	NaNs readcounts in cases where all of the following are true:
 		- The logfold change for the guide/replicate pair is greater than `absolute_cutoff`
@@ -425,19 +425,22 @@ def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, 
 		readcounts (`pandas.DataFrame`): readcount matrix with replicates on rows, guides on columns
 		sequence_map (`pandas.DataFrame`): has string columns "sequence_ID", "cell_line_name", and "pDNA_batch"
 		guide_gene_map (`pandas.DataFrame`): has string columns "sequence_ID", "cell_line_name", and "pDNA_batch"
+		print_to (`str` or `None`): where to print ordinary messages. Default is `stdout`. Pass a file path to print
+								to the file or `None` to skip these messages.
 
 	'''
+	printer = StdoutRedirector(print_to)
 	
 	check_inputs(readcounts={'default': readcounts}, sequence_map={'default': sequence_map},
 					 guide_gene_map={'default': guide_gene_map})
 	
-	print('calculating LFC')
+	printer.print('calculating LFC')
 	fc = calculate_fold_change(readcounts, sequence_map, rpm_normalize)
 	lfc = pd.DataFrame(
 		np.log2(fc.values), index=fc.index,columns=fc.columns
 	)
 
-	print("stacking and annotating LFC")
+	printer.print("stacking and annotating LFC")
 	lfc_stack = lfc.copy()
 	lfc_stack.index.name = "sequence_ID"
 	lfc_stack.columns.name = "sgrna"
@@ -451,42 +454,42 @@ def nan_outgrowths(readcounts, sequence_map, guide_gene_map, absolute_cutoff=2, 
 		.sort_values(["cell_line_name", "gene", "LFC"])\
 		.reset_index(drop=True)
 
-	print("finding group boundaries")
+	printer.print("finding group boundaries")
 	gene_transitions = np.append(lfc_stack.gene.values[:-1] != lfc_stack.gene.values[1:], True)
 	cell_transitions = np.append(lfc_stack.cell_line_name.values[:-1] != lfc_stack.cell_line_name.values[1:], True)
 	transitions = gene_transitions | cell_transitions
 	transition_indices = lfc_stack.index[transitions]
 
-	print("removing cases with only one guide and replicate")
+	printer.print("removing cases with only one guide and replicate")
 	number_lfcs = transition_indices[1:] - transition_indices[:-1]
 	to_drop = transition_indices[[transition_indices[0] == lfc_stack.index[0]] + list(number_lfcs < 2)]
 	lfc_stack.drop(to_drop, inplace=True)
 	transition_indices = sorted(set(transition_indices) - set(to_drop))
 
-	print("finding maximal values")
+	printer.print("finding maximal values")
 	maxima = lfc_stack.LFC[transition_indices].values
 	second_maxima = lfc_stack.LFC[np.array(transition_indices).astype(np.int64)-1].values
 	gaps = maxima - second_maxima
 
 
-	print("making mask")
+	printer.print("making mask")
 	lfc_stack["Mask"] = False
 	bad_rows = np.array(transition_indices)[(maxima > absolute_cutoff) & (gaps > gap_cutoff)]
-	print("found %i outgrowths, %1.1E of the total" % (len(bad_rows), len(bad_rows)/len(lfc_stack)))
+	printer.print("found %i outgrowths, %1.1E of the total" % (len(bad_rows), len(bad_rows)/len(lfc_stack)))
 
 	lfc_stack.loc[bad_rows, "Mask"] = True
 
-	print("pivoting mask")
+	printer.print("pivoting mask")
 	mask = pd.pivot(lfc_stack, values="Mask", index="sequence_ID", columns="sgrna")
 
-	print("aligning_mask")
+	printer.print("aligning_mask")
 
 	mask = mask\
 		.reindex(index=readcounts.index, columns=readcounts.columns)\
 		.fillna(False)\
 		.astype(bool)
 
-	print("NaNing")
+	printer.print("NaNing")
 	readcounts.mask(mask, inplace=True)
 
 
@@ -721,20 +724,21 @@ class Chronos(object):
 				 offset_reg=1,
 				 excess_variance=None,
 				 guide_efficacy_reg=.01,
-				 library_batch_reg=.1,
+				 library_batch_reg=.25,
 				
 				 growth_rate_reg=0.01,
 				 smart_init=True,
 				 pretrained=False,
 				 constrained_mean=False,
 				 replicate_efficacy_guide_quantile=0.02,
-				 initial_screen_delay=3,
+				 initial_screen_delay=.25,
 				 scale_cost=0.67,
 				 max_learning_rate=.04,
 				 dtype=tf.double,
 				 verify_integrity=True, 
 				 log_dir=None,
 				 to_normalize_readcounts=True,
+				 to_nan_outliers=True,
 				 use_line_mean_as_reference=5,
 				 print_to="stdout"
 				):
@@ -793,7 +797,7 @@ class Chronos(object):
 				If True and not `pretrained`, will raise error.
 			replicate_efficacy_guide_quantile (`float`): quantile of guides to use to estimate replicate efficacy. Between 0 and 0.5.
 			initial_screen_delay (`float`): how long after infection before growth phenotype kicks in, in days. If there are fewer than
-								3 late timepoints this initial value will be left unchanged.
+								3 late timepoints this initial value will be left unchanged. Otherwise, Chronos will infer a value per gene.
 			max_learning_rate (`float`): passed to AdamOptimizer after initial burn-in period during training
 			
 			
@@ -807,6 +811,9 @@ class Chronos(object):
 			to_normalize_readcounts (`bool`): If true, the readcounts will be normalized. if negative_control_sgRNAs are provided,
 								Chronos will normalize such that the median log reads of negative controls in each replicate match
 								the median in the pDNA batch. 
+			to_nan_outliers(`bool`): If true, isolated outgrowths in the readcounts will be detected and removed with nan_outgrowths, 
+								after normalizing if `to_normalize_readcounts`. Regardless, if True, readcounts will always be renormalized
+								after nan_outgrowths to avoid problems with inferring the excess variance.
 			use_line_mean_as_reference (`int`): passed to `estimate_alpha`
 			print_to (`str` or `None`): where to print ordinary messages from Chronos. Default is `stdout`. Pass a file path to print
 								to the file or `None` to skip these messages.
@@ -853,10 +860,20 @@ class Chronos(object):
 
 		sequence_map = Chronos._make_pdna_unique(sequence_map, readcounts)
 		Chronos._assign_replicate_IDs(sequence_map)
+
 		if to_normalize_readcounts:
 			self.printer.print("normalizing readcounts")
 			readcounts = {key: normalize_readcounts(val, negative_control_sgrnas.get(key), sequence_map[key])
 						for key, val in readcounts.items()}
+		else:
+			readcounts = {key: v.copy() for key, v in readcounts.items()}
+		to_rpm = not to_normalize_readcounts
+		if to_nan_outliers:
+			for key in readcounts:
+				nan_outgrowths(readcounts[key], sequence_map[key], guide_gene_map[key], rpm_normalize=to_rpm,
+					print_to=print_to)
+				readcounts[key] = normalize_readcounts(readcounts[key], negative_control_sgrnas.get(key), sequence_map[key])
+
 		self.sequence_map = sequence_map
 		self.readcounts = readcounts
 		self.negative_control_sgrnas = negative_control_sgrnas
