@@ -619,62 +619,62 @@ class Chronos(object):
 	The core matrix is gene effect, which is actually two tensors, a matrix and a per-gene vector of means:
 
 	                 Genes                      Genes
-	  		  _____________________		   __________________
+	           _____________________       __________________
 	  cell    |  Mean-centered           1| Mean gene effect
 	  lines   |  gene effect          +
-              |  (column mean = 0)   
+	          |  (column mean = 0)
 
 	The next step is adding the library effect, then expanding the cell line axis to replicate IDs for that library
 	Different libraries in Chronos are mostly represented as values in a dictionary, rather than indices in a tensor
 	dimension. The exception is _library_effects, which is a matrix to enable normalization across libraries.
 
-	                    replicate                               genes                     genes
-	  		            growth rate                      _____________________	    _________________	   
-	{Library_i:          _1_              \\       cell |  Combined                 i|  Library effects[i]   
-	                     |                        lines |  gene effect          +  
-              replicates |         X          {         |                                                    }
-						 |                //
-						 |
+	                    replicate                               genes                       genes
+	                    growth rate                      _____________________        _________________
+	{Library_i:           _1_             \\       cell |  Combined                 i|  Library effects[i]
+	                     |                        lines |  gene effect          +
+	          replicates |         X          {         |                                                    }
+	                     |                //
+	                     |
 
 	This object, a dict of replicate x gene matrices, is called `_gene_effect_growth`. The next step is multiplying by the
 	effective days, i.e. that number of days from transfection for the sequence minus a per-gene "screen delay"
 	that models the lag between knockout and the onset of a viabiliy phenotype (set to 3 days by default):
-					                       
-	  		           			                                      _days_i               
-	  		                 genes                                                    
-	{Library_i:          ___________                                   _1_                              }
-	                     | _gene       //    \\                       |               genes     
-              replicates | growth         X        clip_0{  sequences |      --    ____________  }
-						 | rate        \\    //                       |          1|_screen_delay
-						 |                                            |          
-   
+
+	                                                                  _days_i
+	                         genes
+	{Library_i:           ___________                                 _1_                              }
+	                     | _gene       //   \\                       |               genes
+	          replicates | growth         X       clip_0{  sequences |      --    ____________  }
+	                     | rate        \\   //                       |          1|_screen_delay
+	                     |                                           |
+
 	This object, a dict of sequences by genes, we'll call gene_growth - it doesn't have a variable assigned.
 	It is used to get the relative change in abundance expected if the KO is perfect.
-                                   
+
 	{library_i:     exp(gene_growth_i) - 1}
 
 	Meanwhile, we take the outer product of the per-replicate and per-guide efficacy:
-                              
-                               _1_        guides
-                              |          _______    
-	{library_i:     replicates|     X  1|            }
-                              |
 
-	This object, a dict pf replicate by guide matrices is _efficacy. It's expanded to the sequence level
+	                           _1_        guides
+	                          |          _______
+	{library_i:     replicates|     X  1|            }
+	                          |
+
+	This object, a dict of replicate by guide matrices is _efficacy. It's expanded to the sequence level
 	and multiplied by gene_growth to get _growth:
 
 
-                                    guides                                   genes
-                                ____________                           ______________       
+	                                guides                                   genes
+	                            ____________                           ______________
 	{library_i:                |                //   \\               |                  }
-	                 replicates| _efficacy_i       X        sequences |  growth_i    
-                               |                \\   //               |
+	                 replicates| _efficacy_i       X        sequences |  growth_i
+	                           |                \\   //               |
 
 	This object, a dict of sequence by guide matrices, is called _change, and represents the expected
 	fold change in abundance for each guide from the initial abundance. But we do not assume the initial
 	measured abundance is correct. We allow for something we call "pDNA error", a systematic departure
 	from the measured departure.
-
+ 
 
                     
 	{library_i      sequences            
@@ -947,7 +947,7 @@ class Chronos(object):
 		#the libraries may cover different genes, so gene effect estimates for a cell line in one
 		#library may not be meaningful if there are no guides. The mask NAs that value for both
 		#optimization and when the model reports values
-		self._gene_effect_mask, self.mask_count = self._get_gene_effect_mask(readcounts, sequence_map, 
+		self._gene_effect_mask, self.mask_count, self.numpy_ge_masks = self._get_gene_effect_mask(readcounts, sequence_map, 
 														guide_gene_map, dtype)
 		#tensor days are multipled by the default_timepoint_scale to reduce the risk of over/underflow
 		self._days = self._get_days(sequence_map, dtype)
@@ -998,7 +998,7 @@ class Chronos(object):
 		# _combined_gene_effect is the sum of v_mean_effect and _true_residue. This is the tensor 
 		# accessed by the attribute Chronos.gene_effect.
 		(self.v_mean_effect, self.v_residue, self._residue, self._true_residue, 
-			self._combined_gene_effect, self.v_library_effect, self._library_effect
+			self._combined_gene_effect, self.v_library_effect, self._library_effect, self._library_data_size
 		) = self._get_tf_gene_effect(dtype)
 
 
@@ -1042,7 +1042,7 @@ class Chronos(object):
 		)
 
 		self._library_means, self._library_batch_cost = self._get_library_batch_reg(
-			self._true_residue, self.library_batch_reg, dtype
+			self._true_residue, self.library_batch_reg, self.numpy_ge_masks, dtype
 		)
 
 		self.run_dict.update({self._scale: 1.0})
@@ -1503,7 +1503,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 		mask_count = combined_mask.sum().sum()
 		combined_mask = combined_mask.astype(self.np_dtype)
 		_gene_effect_mask = tf.constant(combined_mask.values, dtype=dtype, name="GE_mask")
-		return _gene_effect_mask, mask_count
+		return _gene_effect_mask, mask_count, masks
 
 
 
@@ -1734,6 +1734,11 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 		self.printer.print("building gene effect")
 
 		with tf.compat.v1.name_scope("GE"):
+			# gene_effect has two components: a mean effect (1D vector) carrying the mean gene effect
+			# over all cell lines, and a cell-line-specific 
+			# _residue_effect, which is constrained to have mean 0 unless using a pretrained model
+			# because the screens being evaluated with the pretrained model are allowed
+			# to have a different mean from the pretraining
 			gene_effect_est = np.random.uniform(-.0001, .0001, size=(self.nlines, self.ngenes)).astype(self.np_dtype)
 			gene_effect_est = gene_effect_est - gene_effect_est.mean(axis=0).reshape((1, -1))
 			v_mean_effect = tf.Variable(
@@ -1752,9 +1757,14 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 						name="mean_centered"
 						)
 				  
+			# the acctual gene effect of interest
 			_combined_gene_effect = tf.add(v_mean_effect, _true_residue, name="GE")
 
+
+			# library effects
 			with tf.compat.v1.name_scope("library_effect"):
+
+				#base (unconstrained) tensor
 				v_library_effect = {
 					key: tf.Variable(
 						np.zeros((1, self.ngenes)).astype(self.np_dtype),
@@ -1763,26 +1773,62 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 					for key in self.keys}
 
 
-				gene_overlap_indicator = np.array([s in self.intersecting_genes for s in self.all_genes], 
-					dtype=self.np_dtype).reshape((1, -1))
-				_gene_overlap_indicated = tf.constant(gene_overlap_indicator, dtype=dtype, name="gene_overlap_indicator")
-				library_mean_guides = {
+				gene_presence_indicator = {
+					key: (
+							self.numpy_ge_masks[key].mean()[self.all_genes] > .5
+						).values.reshape((1, -1)).astype(self.np_dtype)
+					for key in self.keys
+				}
+
+				_gene_presence_indicated = {key: tf.constant(val,
+							 dtype=dtype, name="gene_overlap_indicator"
+				) for key, val in gene_presence_indicator.items()}
+
+				# Library effects are constrained to have a *weighted* mean of 0 across libraries.
+				# the weights are the number of guides for each gene in the library x the number of
+				# screens in the library - essentially, the amount of data in the library for the gene.
+
+				library_n_guides = {
 					key: self.guide_gene_map[key]\
-							.query("gene in %r" % list(self.intersecting_genes))
 							.groupby("gene")\
 							.sgrna\
 							.count()\
-							.mean()
+							.reindex(self.all_genes)\
+							.fillna(0)\
+							.values\
+							.reshape((1, -1))
 					for key in self.keys
 				}
-				library_mean_guides = {
-					key: val / sum(library_mean_guides.values())
-					for key, val in library_mean_guides.items()
+
+				library_n_lines = {
+					key: self.sequence_map[key]\
+						.cell_line_name\
+						.nunique() - 1 # -1 for pDNA name in cell lines
+						for key in self.keys
 				}
-				_library_effect_indicated = {key: v * _gene_overlap_indicated for key, v in v_library_effect.items()}
-				_library_effect_mean = tf.add_n([library_mean_guides[key] * _library_effect_indicated[key]
-									 for key in self.keys])
-				_library_effect = {key: v - _library_effect_mean for key, v in _library_effect_indicated.items()}
+
+				library_data_size = {key: library_n_guides[key]*library_n_lines[key] for key in self.keys}
+
+
+				_library_data_size = {key: tf.constant(val, dtype=dtype, name="library_data_size_%s" % key)
+										for key, val in library_data_size.items()
+										}
+
+				_library_data_total_size = tf.constant(
+					sum([val for val in library_data_size.values()]),
+					 dtype=dtype, name="library_data_size_summed"
+				)
+
+				#_library_effect_indicated = {key: v * _gene_presence_indicated[key] for key, v in v_library_effect.items()}
+				_library_effect_mean = tf.add_n([
+					   _library_data_size[key] * v_library_effect[key] 
+					for key in self.keys
+				]) / _library_data_total_size
+
+				if self._pretrained:
+					_library_effect = v_library_effect
+				else:
+					_library_effect = {key: v - _library_effect_mean for key, v in v_library_effect.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
 
@@ -1790,7 +1836,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 
 
 		return v_mean_effect, v_residue, _residue, _true_residue, _combined_gene_effect, \
-				v_library_effect, _library_effect
+				v_library_effect, _library_effect, _library_data_size
 
 
 #############################    C  O  R  E      M  O  D  E  L    ##############################
@@ -1946,26 +1992,33 @@ guide abundance"
 		return _guide_reg_cost
 
 
-	def _get_library_batch_reg(self, _gene_effect, library_reg, dtype):
+	def _get_library_batch_reg(self, _gene_effect, library_reg, numpy_ge_masks, dtype):
 		group_indicators = {}
 		with tf.compat.v1.name_scope("library_batch_reg"):
-			for key, group in self.cells.items():
-				group_indicator = pd.Series(np.ones(len(group)),
-									index=group
-					).reindex(self.all_cells).fillna(0).astype(self.np_dtype)
 
-				group_indicators[key] = group_indicator
+			_library_masks = {key: tf.constant(val.values.astype(self.np_dtype), dtype, name="library_mask_%s" % key)
+									for key, val in numpy_ge_masks.items()}
 
-			_group_indicators = {key: tf.constant(val.values.reshape((-1, 1)), dtype, name="group_indicator_%s" % key)
-									for key, val in group_indicators.items()}
-			_indicator_product = {key: tf.multiply(val, _gene_effect, name="indicator_product_%s" % key) for key, val in _group_indicators.items()}
+			_library_mask_sums = {key: tf.constant(
+				val.values.astype(self.np_dtype).sum().clip(1, 1e6).reshape((1, -1)), 
+				dtype, 
+				name="library_mask_sum_%s" % key
+			) for key, val in numpy_ge_masks.items()}
 
-			_library_means = {key: tf.reduce_sum(val, axis=0, name="library_effect_sum")[tf.newaxis, :] / group_indicators[key].sum()
-								for key, val in _indicator_product.items()}
+			_indicator_product = {key: tf.multiply(
+				val, _gene_effect, name="library_mask_product_%s" % key
+			) for key, val in _library_masks.items()}
+
+			_library_means = {key: tf.reduce_sum(
+					val, axis=0, name="library_effect_sum"
+				)[tf.newaxis, :] / _library_mask_sums[key]
+				for key, val in _indicator_product.items()
+			}
 
 			_library_reg = tf.add_n([
 				library_reg * tf.reduce_mean(_library_means[key]**2, name="squared_means")
-				for key in self.keys], name="library_reg")
+				for key in self.keys
+			], name="library_reg")
 
 		return _library_means, _library_reg
 
@@ -2528,10 +2581,10 @@ your data" % missing
 			'library_effect.csv': the estimated bias for each gene in each library, for genes present in all libraries.
 			't0_offset.csv': the estimated fractional difference in the relative abundance of each sgRNA in each library
 				where present from that reported in the pDNA.
-			'paramdeters.json': the hyperparameters passed to `__init__` when the model was created. Also includes the 
+			'parameters.json': the hyperparameters passed to `__init__` when the model was created. Also includes the 
 				calculated `cost` and `full_cost` for reference.
 		If `include_inputs`:
-			'<library>_readcounts.hdf5': for each library, the matrix of observed readcounts. If Chronos mnormalized 
+			'<library>_readcounts.hdf5': for each library, the matrix of observed readcounts. If Chronos normalized 
 				these, the written version will also be normalized.
 			'<library>_guide_gene_map.csv': for each library, the guide to gene map.
 			'<library>_sequence_map.csv': for each library, the sequence map. The pDNA batch labels will have the library
