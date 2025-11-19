@@ -522,8 +522,7 @@ def check_for_excess_correlation(readcounts, condition_map, negative_control_sgr
 		diff_max = mean_corrs\
 			.groupby(["cell_line_name", "days"])\
 			.apply(lambda df: 
-				   df[df.same_condition].mean_corr.max() - df[~df.same_condition].mean_corr.max(),
-				   include_groups=False
+				   df[df.same_condition].mean_corr.max() - df[~df.same_condition].mean_corr.max()
 			)
 		if diff_max.max() > .1:
 			warn("Library %s: Negative controls are more highly correlated between replicates of the same \
