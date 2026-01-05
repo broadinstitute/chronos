@@ -37,11 +37,7 @@ As of 09/01/2023, `pip install tensorflow` should work on Macs with arm64.
 
 ## Installing Chronos
 
-If you have `pip` installed, you can install Chronos from PyPI with
-
-`    $ pip install crispr_chronos`
-
-However, we recommend downloading this repository as well to run the vignette and download the DepMap trained Chronos parameters.
+We recommend downloading this repository, navigating to this directory, and running `pip install .`.
 
 Chronos `model` requires `python 3` with the packages `tensorflow 2.x`, `numpy`, `pandas`,`h5py`. However, additional modules require additional packages which will be installed by default if missing: `patsy`, `statsmodels`, `scipy`, `matplotlib`, `seaborn`, `adjust_text`, `scikit-learn`, `umap`, `reportlab`.
 
