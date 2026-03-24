@@ -1,7 +1,7 @@
 {
-    "gene_effect.csv": "https://plus.figshare.com/ndownloader/files/43346616",
-    "guide_efficacy.csv": "https://plus.figshare.com/ndownloader/files/43346709",
-    "cell_line_efficacy.csv": "https://plus.figshare.com/ndownloader/files/43346718",
-    "library_effect.csv": "https://plus.figshare.com/ndownloader/files/43346715",
-    "t0_offset.csv": "https://plus.figshare.com/ndownloader/files/43346733"
+    "gene_effect.csv": "https://ndownloader.figshare.com/files/62677015",
+    "guide_efficacy.csv": "https://ndownloader.figshare.com/files/62676952",
+    "replicate_efficacy.csv": "https://ndownloader.figshare.com/files/62676955",
+    "library_effect.csv": "https://ndownloader.figshare.com/files/62676949",
+    "t0_offset.csv": "https://ndownloader.figshare.com/files/62676946"
 }
