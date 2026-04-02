@@ -1170,7 +1170,7 @@ def check_integration_umap(gene_effect, sequence_map,
 
 
 
-def check_integration_mean_deviation(gene_effect, sequence_map,
+def check_integration_mean_deviation(gene_effect, sequence_map, guide_map,
 					 ax=None, metrics=None, legend=True,
 					  legend_args=dict(fontsize=7),
 					plot_args=dict(lw=1)
@@ -1199,13 +1199,22 @@ def check_integration_mean_deviation(gene_effect, sequence_map,
 		library: gene_effect[indicators[library]].mean()
 		for library in indicators
 	})
+
+	n_sequences = pd.Series({key: len(val.query("cell_line_name != 'pDNA'")) for key, val in sequence_map.items()})
+	n_guides = pd.Series({key: len(val) for key, val in guide_map.items()})
+	n_data = n_sequences * n_guides
+
 	means = gene_effect.mean()
+	weighted_means = (
+		n_data.loc[library_means.columns].values.reshape((1, -1)) * library_means / n_data.sum()
+	).sum(axis=1)
+
 	if ax is None:
 		ax = plt.gca()
 	else:
 		plt.sca(ax)
 	for library in indicators:
-		y = (library_means[library]-means)**2
+		y = (library_means[library]-weighted_means)**2
 		trend = np.clip(lowess_trend(means, y), 0, np.inf)
 		order = np.argsort(means)
 		plt.plot(means.iloc[order], trend[order], label=library, **plot_args)

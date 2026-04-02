@@ -22,6 +22,41 @@ from .plotting import density_scatter, dict_plot
 from scipy.stats import pearsonr
 from statsmodels.stats.multitest import fdrcorrection
 
+from matplotlib import rcParams
+from matplotlib import cycler as color_cycler
+
+from copy import copy
+
+okabe_ito = [
+    [230/255, 159/255, 0],
+    [86/255, 180/255, 233/255],
+    [0, 158/255, 115/255],
+    [204/255, 121/255, 167/255],
+    [0, 114/255, 178/255],
+    [213/255, 94/255, 0],
+    [240/255, 228/255, 66/255]
+]
+
+matplotlib_rcParams_update = {
+	'axes.titlesize': 11,
+	'axes.spines.right': False,
+	'axes.spines.top': False,
+	'savefig.dpi': 200,
+	'savefig.transparent': False,
+	'font.family': 'Arial',
+	'font.size': '10',
+	'figure.dpi': 200,
+	"savefig.facecolor": (1, 1, 1.0, 0.2),
+	'xtick.labelsize': 9,
+	'ytick.labelsize': 9,
+	'legend.fontsize': 7,
+	'axes.prop_cycle': color_cycler(color=okabe_ito),
+}
+
+#set default cycle to Okabe-Ito
+
+
+
 
 def load_chronos_data_for_qc(directory, gene_effect_file="gene_effect.hdf5"):
 	'''
@@ -200,6 +235,10 @@ def qc_initial_data(title, readcounts, sequence_map, guide_map, negative_control
 	Returns:
 		`dict` containing the calculated QC metrics, which will also be in the report.
 	'''
+
+	original_rcParams = copy(rcParams)
+	rcParams.update(matplotlib_rcParams_update)
+
 	if report_name is None:
 		report_name = title + ".pdf"
 	doc = SimpleDocTemplate(os.path.join(directory, report_name), **doc_args)
@@ -375,6 +414,7 @@ sgRNAs should tend to fall below the diagonal. Note that each axis is the log(no
 		
 	doc.build(story)
 	
+	rcParams.update(original_rcParams)
 	return metrics
 
 
@@ -417,6 +457,7 @@ def dataset_qc_report(title, data,
 	Returns:
 		`dict` containing the calculated QC metrics, which will also be in the report.
 	'''
+
 	if isinstance(data, str):
 		try:
 			print("Loading data from %s" % data)
@@ -468,7 +509,9 @@ You passed '%s', %r" % (data, gene_effect_file))
 		story.append(im)
 		story.append(Spacer(.125, 12))
 
-	
+	original_rcParams = copy(rcParams)
+	rcParams.update(matplotlib_rcParams_update)
+
 	story.append(Paragraph(title, style=styles["Heading1"]))
 	
 	story.append(Paragraph("Control Separation", style=styles["Heading2"]))
@@ -590,7 +633,7 @@ They should have a high peak near 1."))
 		plt.sca(axes[0])
 		check_integration_umap(data['gene_effect'], data['sequence_map'], metrics=metrics)
 		plt.sca(axes[1])
-		check_integration_mean_deviation(data['gene_effect'], data['sequence_map'], metrics=metrics)
+		check_integration_mean_deviation(data['gene_effect'], data['sequence_map'], data["guide_map"], metrics=metrics)
 		story.append(Paragraph("Prediction Accuracy", style=styles["Heading2"])) 
 		add_image("library_integration.png")
 		story.append(PageBreak())
@@ -704,6 +747,9 @@ NA results for guide efficacy are replaced with -.1"))
 
 	print("building report")
 	doc.build(story)
+
+	rcParams.update(original_rcParams)
+	
 	return metrics
 
 
@@ -905,8 +951,9 @@ on the same scale."
 	for i, key, in enumerate(data.keys()):
 		plt.sca(axes[i])
 		plt.title(key)
-		check_integration_mean_deviation(data[key]["gene_effect"], data[key]['sequence_map'], metrics=metrics[key],
-								)
+		check_integration_mean_deviation(data[key]["gene_effect"], data[key]['sequence_map'], data[key]["guide_map"],
+			 metrics=metrics[key],
+		)
 	add_image("integration_deviation.png")
 	story.append(PageBreak())
 	

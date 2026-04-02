@@ -1502,7 +1502,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 			)
 		mask_count = combined_mask.sum().sum()
 		combined_mask = combined_mask.astype(self.np_dtype)
-		_gene_effect_mask = tf.constant(combined_mask.values, dtype=dtype, name="GE_mask")
+		_gene_effect_mask = tf.Variable(combined_mask.values, dtype=dtype, name="GE_mask")
 		return _gene_effect_mask, mask_count, masks
 
 
@@ -1535,6 +1535,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 			mask = pd.notnull(normalized_readcounts_np)
 			_mask[key] = tf.constant(mask, dtype=tf.bool, name='NaN_mask_%s' % key)
 			normalized_readcounts_np[~mask] = 0
+			#saves readcount tensors in a persistent state to reduce passing back and forth
 			_normalized_readcounts[key] = self.get_persistent_input(dtype, normalized_readcounts_np, name='normalized_readcounts_%s' % key)
 			self.printer.print("\tbuilt normalized timepoints for %s with shape %r (replicates X guides)" %(
 				key, normalized_readcounts_np.shape))
@@ -2180,12 +2181,21 @@ guide abundance"
 		'''
 		Initial estimate of gene effect using the mean fold changes guides for each gene in the latest provided time points, per library
 		'''
-		mean_fold_change = fold_change\
-								.loc[last_sequences]\
-								.groupby(sequence_map.set_index("sequence_ID").cell_line_name)\
-								.mean()\
-								.T.groupby(guide_gene_map.set_index("sgrna").gene)\
-								.mean().T
+		try:
+			mean_fold_change = fold_change\
+									.loc[last_sequences]\
+									.groupby(sequence_map.set_index("sequence_ID").cell_line_name)\
+									.mean()\
+									.T.groupby(guide_gene_map.set_index("sgrna").gene)\
+									.mean().T
+		except Exception as e:
+			raise ValueError(
+				f"Exception {e.string} encountered in calculating mean fold change.\n"
+				f"fold change: \n{fold_change}\n\n"
+				f"sequence map grouper: \n{sequence_map.set_index("sequence_ID").cell_line_name}\n\n"
+				f"guide map grouper: \n{guide_gene_map.set_index("sgrna").gene}" 
+			)
+
 		mean_fold_change.replace(0, 1e-3, inplace=True)
 		denom = sequence_map.set_index("sequence_ID").loc[last_sequences].groupby("cell_line_name").days.max() - screen_delay
 		denom = denom.loc[mean_fold_change.index] * Chronos.default_timepoint_scale
@@ -2493,9 +2503,8 @@ your data" % missing
 				.fillna(1)\
 				.reindex(columns=self.all_genes)\
 				.fillna(0)
-		_gene_effect_mask = tf.constant(mask.values, dtype=self.np_dtype)
+		self.sess.run(self._gene_effect_mask.assign(mask.values.astype(self.np_dtype)))
 		mask_count = (mask == 1).sum().sum()
-		self._gene_effect_mask = _gene_effect_mask
 		self.mask_count = mask_count
 
 		# want to use the gene_effect matrix and not v_mean_effect's mean because the training data's masking is relevant
@@ -2594,14 +2603,16 @@ your data" % missing
 			'<library>_predicted_lfc.hdf5': for each library, the matrix of predicted sgRNA log fold-change (from observed
 				relative pDNA abundance). 
 		'''
+		self.printer.print(f"saving to {directory}")
 		if os.path.isdir(directory) and not overwrite:
 			raise IOError("Directory %r exists. To overwrite contents, pass `overwrite=True`" % directory)
 		elif not os.path.isdir(directory):
 			os.mkdir(directory)
-
+		self.printer.print("\twriting gene effect")
 		write_hdf5(self.gene_effect, os.path.join(directory, "gene_effect.hdf5"))
 		pd.DataFrame({"efficacy": self.guide_efficacy}).to_csv(os.path.join(directory,  "guide_efficacy.csv"))
 		
+		self.printer.print("\twriting efficacy")
 		efficacy = self.replicate_efficacy
 		stacked_efficacy = pd.concat([
 			pd.DataFrame({
@@ -2611,6 +2622,7 @@ your data" % missing
 			for key, val in efficacy.items()])
 		stacked_efficacy.to_csv(os.path.join(directory,  "replicate_efficacy.csv"))
 
+		self.printer.print("\twriting growth rate")
 		growth_rate = self.growth_rate
 		stacked_growth_rate = pd.concat([
 			pd.DataFrame({
@@ -2620,11 +2632,16 @@ your data" % missing
 			for key, val in growth_rate.items()])
 		stacked_growth_rate.to_csv(os.path.join(directory,  "growth_rate.csv"))
 
+		self.printer.print("\twriting excess variance")
 		pd.DataFrame(self.excess_variance).to_csv(os.path.join(directory,  "screen_excess_variance.csv"))
+		self.printer.print("\twriting screen delay")
 		pd.DataFrame({'screen_delay': self.screen_delay}).to_csv(os.path.join(directory,  "screen_delay.csv"))
+		self.printer.print("\twriting library effect")
 		self.library_effect.to_csv(os.path.join(directory,  "library_effect.csv"))
+		self.printer.print("\twriting t0 offset")
 		pd.DataFrame(self.t0_offset).to_csv(os.path.join(directory,  "t0_offset.csv"))
 
+		self.printer.print("\twriting parameters")
 		parameters = {
 			"guide_efficacy_reg": self.guide_efficacy_reg,
 			"gene_effect_L1": self.gene_effect_L1,
@@ -2643,22 +2660,43 @@ your data" % missing
 			f.write(json.dumps(parameters))
 
 		if include_inputs:
+			self.printer.print("\twriting inputs")
 			for key in self.keys:
+				self.printer.print(f"\t\t{key}")
+				self.printer.print("\t\t\treadcounts")
 				write_hdf5(self.readcounts[key], os.path.join(directory, "%s_readcounts.hdf5" % key))
+				self.printer.print("\t\t\tguide gene map")
 				self.guide_gene_map[key].to_csv(os.path.join(directory, "%s_guide_gene_map.csv" % key), index=None)
+				self.printer.print("\t\t\tsequence map")
 				self.sequence_map[key].to_csv(os.path.join(directory, "%s_sequence_map.csv" % key), index=None)
 				if key in self.negative_control_sgrnas:
+					self.printer.print("\t\t\tnegative control sgRNAs")
 					pd.DataFrame(self.negative_control_sgrnas[key]).to_csv(os.path.join(directory, "%s_negative_control_sgrnas.csv" % key),
 						index=None)
 
 		if include_outputs:
+			self.printer.print("\twriting outputs")
 			predicted_readcounts = self.predicted_readcounts
 			fc = self.estimated_fold_change
 			for key in self.keys:
-				write_hdf5(predicted_readcounts[key], os.path.join(directory, "%s_predicted_readcounts.hdf5" % key))
-				write_hdf5(pd.DataFrame(np.log2(fc[key].values), index=fc[key].index, columns=fc[key].columns),
+				self.printer.print(f"\t\t{key}")
+
+				self.printer.print("\t\t\tpredicted readcounts")
+				write_hdf5(
+					predicted_readcounts[key], 
+					os.path.join(directory, "%s_predicted_readcounts.hdf5" % key)
+				)
+
+				self.printer.print("\t\t\tpredicted LFC")
+				write_hdf5(
+					pd.DataFrame(
+						np.log2(fc[key].values), 
+						index=fc[key].index, 
+						columns=fc[key].columns
+					),
 					os.path.join(directory, "%s_predicted_lfc.hdf5" % key)
 					)
+		self.printer.print("save complete")
 
 	def snapshot(self):
 		'''
@@ -2779,7 +2817,7 @@ your data" % missing
 	@replicate_efficacy.setter
 	def replicate_efficacy(self, desired_efficacy):
 		#default format saved in directory
-		if "library" in desired_efficacy:
+		if "library" in desired_efficacy and not isinstance(desired_efficacy, dict):
 			desired_efficacy = dict((library, eff["replicate_efficacy"]) 
 				for library, eff in desired_efficacy.groupby("library"))
 		for key in self.keys:
