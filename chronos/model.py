@@ -1487,7 +1487,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 		combined_mask = None
 		for mask in masks.values():
 			if combined_mask is None:
-				combined_mask = mask
+				combined_mask = mask.copy()
 			else:
 				combined_mask |= mask.values
 		missing_lines = combined_mask.any(axis=1).loc[lambda x: ~x].index
