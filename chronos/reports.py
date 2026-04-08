@@ -1233,7 +1233,8 @@ def differential_dependency_report(
 		ged = table["gene_effect_difference"]
 		fdr_volcano(ged, fdr, label_outliers=10, outliers_from="xy_zscore")
 		plt.ylabel("FDR (-log10)")
-		plt.xlabel(f"Gene Effect Diff. {conditions[0][:12]} - {conditions[1][:12]}")
+		plt.xlabel(f"Gene Effect Diff. {conditions[1][:12]} - {conditions[0][:12]}")
+		plt.title("")
 
 		plt.sca(axes[1])
 		density_scatter(table[f"gene_effect_in_{conditions[1]}"], table[f"gene_effect_in_{conditions[0]}"],
@@ -1246,23 +1247,23 @@ def differential_dependency_report(
 
 		sigup = fdr.index[(fdr < .1) & (ged > 0)]
 		if len(sigup) >= 3:
-			story.append(Paragraph(
-				f"Term enrichment for the genes more essential in {conditions[1]}:"
-			))
-			plot_enriched_terms([s.split(' ')[0].strip() for s in sigup])
-			plt.gcf().set_size_inches(plot_width, plot_height)
-			plt.tight_layout()
-			add_image(f"diffdep_up_genetea_enrichment_{line}.png")
+			axes = plot_enriched_terms([s.split(' ')[0].strip() for s in sigup])
+			if not (axes is None):
+				plt.gcf().suptitle(f"Genes more essential in {conditions[1]}")
+				plt.gcf().set_size_inches(plot_width, plot_height)
+				plt.tight_layout()
+				fig.subplots_adjust(top=0.88)
+				add_image(f"diffdep_up_genetea_enrichment_{line}.png")
 
 		sigdown = fdr.index[(fdr < .1) & (ged < 0)]
 		if len(sigup) >= 3:
-			story.append(Paragraph(
-				f"Term enrichment for the genes more essential in {conditions[0]}:"
-			))
-			plot_enriched_terms([s.split(' ')[0].strip() for s in sigdown])
-			plt.gcf().set_size_inches(plot_width, plot_height)
-			plt.tight_layout()
-			add_image(f"diffdep_down_genetea_enrichment_{line}.png")
+			axes = plot_enriched_terms([s.split(' ')[0].strip() for s in sigdown])
+			if not (axes is None):
+				plt.gcf().suptitle(f"Genes more essential in {conditions[0]}")
+				plt.gcf().set_size_inches(plot_width, plot_height)
+				plt.tight_layout()
+				fig.subplots_adjust(top=0.88)
+				add_image(f"diffdep_down_genetea_enrichment_{line}.png")
 
 
 	print("building report")
