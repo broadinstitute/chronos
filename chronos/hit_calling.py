@@ -550,7 +550,6 @@ def check_calibration(pvals, max_allowed_ks_statistic=.1):
 	else:
 		return True
 
-
 class ConditionComparison():
 	'''
 	An object that manages the various Chronos models needed to compare two conditions. 

@@ -403,11 +403,39 @@ such as tumor suppressor KO or your experiment is a rescue experiment."
 "We also show reads in the late timepoints compared to the pDNA. If control groups are provided, these are broken \
 out separately. We expect negative control sgRNAs to be closely aligned to pDNA abundance, while positive control \
 sgRNAs should tend to fall below the diagonal. Note that each axis is the log(normalized counts + 1)."))
-	for line in worst:
+
+	for cell_line in worst:
 		story.append(PageBreak())
 		story.append(Paragraph(line, style=styles["Heading3"]))
-		all_replicate_plot(normalized, sequence_map, line, plot_width)
-		add_image("%s_rep_plot.png" % line)
+
+		reps = sequence_map.query("cell_line_name == %r" % cell_line).sequence_ID.unique()
+		rep_labels = dict(zip(reps, trim_overlapping_lead_and_tail(reps)))
+		n = 0
+		titles = {}
+		for i in range(len(reps)-1):
+			for j in range(i+1, len(reps)):
+				n += 1
+				titles["%s %i" % (cell_line, n)] = (reps[i], reps[j])
+
+		for i in range(0, len(titles)+len(titles)//2, 2):
+			fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height))
+
+			for j in range(2):
+				try:
+					title = list(titles.keys())[i+j]
+				except IndexError:
+					fig.delaxes(axes[j])
+					continue
+				plt.sca(axes[j])
+				replicate_plot(normalized, *titles[title])
+				plt.xlabel("Rep." + rep_labels[titles[title][0]])
+				plt.ylabel("Rep." + rep_labels[titles[title][1]])
+				plt.title(title)
+			plt.tight_layout()
+
+			add_image(f"replicate_corr_plots_{line}_{i}.png")
+
+
 		paired_pDNA_plots(normalized, sequence_map, line, negative_control_sgrnas, positive_control_sgrnas,
 						 plot_width, plot_height)
 		add_image("%s_pdna_plot.png" % line)
@@ -555,88 +583,90 @@ The FDRs should be considered optimistic."
 
 	story.append(Paragraph("General Parameter Info", style=styles["Heading2"]))
 
-	story.append(Paragraph("Statistical Properties of Gene Effects", style=styles["Heading3"]))
-	print("plotting gene effect mean relationships")
-	story.append(Paragraph(
-"Higher overall gene SD is better (if control separation in each cell line is maintained). There is usually a trend \
-towards more variance in more negative genes. There should NOT be a trend in the second plot."
-))
-	fig, axes = plt.subplots(1, 1, figsize=(plot_width, plot_height))
-	mean_vs_sd_scatter(data["gene_effect"], metrics=metrics)
+	if len(data["gene_effect"]) > 1:
+		story.append(Paragraph("Statistical Properties of Gene Effects", style=styles["Heading3"]))
+		print("plotting gene effect mean relationships")
 
-	if not copy_number is None:
-		print("plotting copy number effect")
-		story.append(Paragraph("Copy Number Effect", style=styles["Heading3"])) 
 		story.append(Paragraph(
-		"Relationship of genomic copy number to estimated gene effect both overall (left) and per gene binned \
-		by gene mean (right). Ideally there is no systematic relationship."
-		))
+	"Higher overall gene SD is better (if control separation in each cell line is maintained). There is usually a trend \
+	towards more variance in more negative genes. There should NOT be a trend in the copy number plot."
+	))
+		fig, axes = plt.subplots(1, 1, figsize=(plot_width, plot_height))
+		mean_vs_sd_scatter(data["gene_effect"], metrics=metrics)
+
+		if not copy_number is None:
+			print("plotting copy number effect")
+			story.append(Paragraph("Copy Number Effect", style=styles["Heading3"])) 
+			story.append(Paragraph(
+			"Relationship of genomic copy number to estimated gene effect both overall (left) and per gene binned \
+			by gene mean (right). Ideally there is no systematic relationship."
+			))
+			fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height))
+			plt.sca(axes[0])
+			copy_number_trend(data['gene_effect'], copy_number, downsample=.01, downsample_lower_quantile_bound=.01,
+							downsample_upper_quantile_bound=.99, metrics=metrics)
+			plt.sca(axes[1])
+			copy_number_gene_corrs(data['gene_effect'], copy_number, metrics=metrics)
+			add_image("copy_number_effect.png")
+		
+		print("plotting screen efficacy and growth rate")
+		story.append(Paragraph("Screen Efficacy, Growth Rate, and Guide Efficacy", style=styles["Heading3"]))
+		story.append(Paragraph(
+	"These parameters together translate a gene effect into the expected impact on cell proliferation. \
+	Often there will be a trend towards lower growth estimates with lower cell efficacy estimates. \
+	Guide efficacies have a single global value, but here have been grouped by presence in a library. \
+	They should have a high peak near 1."))
+
+		growth_rate = []
+		replicate_efficacy = []
+
+		for library in library_data:
+
+			gr, cle = data["growth_rate"].query("library == %r" % library)["growth_rate"].dropna().align(
+				data['replicate_efficacy'].query("library == %r" % library)["replicate_efficacy"].dropna(), 
+				join="inner"
+			)
+
+			growth_rate.append(gr)
+			replicate_efficacy.append(cle)
+
+		growth_rate, replicate_efficacy = pd.concat(growth_rate), pd.concat(replicate_efficacy)
 		fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height))
 		plt.sca(axes[0])
-		copy_number_trend(data['gene_effect'], copy_number, downsample=.01, downsample_lower_quantile_bound=.01,
-						downsample_upper_quantile_bound=.99, metrics=metrics)
+		density_scatter(growth_rate, replicate_efficacy, trend_line=False, outliers_from="xy_zscore")
+		plt.xlabel("Relative Growth Rate")
+		plt.ylabel("Replicate Screening Efficacy")
+		metrics["growth_rate_sd"] = growth_rate.std()
+		metrics["cell_efficacy_mean"] = replicate_efficacy.mean()
 		plt.sca(axes[1])
-		copy_number_gene_corrs(data['gene_effect'], copy_number, metrics=metrics)
-		add_image("copy_number_effect.png")
-	
-	print("plotting screen efficacy and growth rate")
-	story.append(Paragraph("Screen Efficacy, Growth Rate, and Guide Efficacy", style=styles["Heading3"]))
-	story.append(Paragraph(
-"These parameters together translate a gene effect into the expected impact on cell proliferation. \
-Often there will be a trend towards lower growth estimates with lower cell efficacy estimates. \
-Guide efficacies have a single global value, but here have been grouped by presence in a library. \
-They should have a high peak near 1."))
-
-	growth_rate = []
-	replicate_efficacy = []
-
-	for library in library_data:
-
-		gr, cle = data["growth_rate"].query("library == %r" % library)["growth_rate"].dropna().align(
-			data['replicate_efficacy'].query("library == %r" % library)["replicate_efficacy"].dropna(), 
-			join="inner"
-		)
-
-		growth_rate.append(gr)
-		replicate_efficacy.append(cle)
-
-	growth_rate, replicate_efficacy = pd.concat(growth_rate), pd.concat(replicate_efficacy)
-	fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height))
-	plt.sca(axes[0])
-	density_scatter(growth_rate, replicate_efficacy, trend_line=False, outliers_from="xy_zscore")
-	plt.xlabel("Relative Growth Rate")
-	plt.ylabel("Replicate Screening Efficacy")
-	metrics["growth_rate_sd"] = growth_rate.std()
-	metrics["cell_efficacy_mean"] = replicate_efficacy.mean()
-	plt.sca(axes[1])
-	for library, guide_map in data['guide_map'].items():
-		guides = guide_map.sgrna.unique()
-		efficacies = data['guide_efficacy'].reindex(guides).dropna()
-		sns.kdeplot(efficacies, bw_adjust=.5, lw=1, label=library)
-		metrics["guide_eff_%s_mean" % library] = efficacies.mean()
-	plt.legend()
-	plt.xlabel("Guide Efficacy")
-	add_image("parameter_distributions.png")
-	story.append(PageBreak())
-
-	if len(data['guide_map']) > 1:
-		print("plotting library integration")
-		story.append(Paragraph("Library Integration", style=styles["Heading2"]))
-		story.append(Paragraph(
-			"The UMAP embedding of cell line gene effects colored by library presence (left) and how \
-	far a gene's average within a library deviates from the overall average, by library (right). \
-	The UMAP embedding uses only the 50% most variable genes. \
-	On the right, a lowess trend is fitted per library to the squared difference of the gene's mean within \
-	models screened with the library and its mean overall."
-		))
-		fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height))
-		plt.sca(axes[0])
-		check_integration_umap(data['gene_effect'], data['sequence_map'], metrics=metrics)
-		plt.sca(axes[1])
-		check_integration_mean_deviation(data['gene_effect'], data['sequence_map'], data["guide_map"], metrics=metrics)
-		story.append(Paragraph("Prediction Accuracy", style=styles["Heading2"])) 
-		add_image("library_integration.png")
+		for library, guide_map in data['guide_map'].items():
+			guides = guide_map.sgrna.unique()
+			efficacies = data['guide_efficacy'].reindex(guides).dropna()
+			sns.kdeplot(efficacies, bw_adjust=.5, lw=1, label=library)
+			metrics["guide_eff_%s_mean" % library] = efficacies.mean()
+		plt.legend()
+		plt.xlabel("Guide Efficacy")
+		add_image("parameter_distributions.png")
 		story.append(PageBreak())
+
+		if len(data['guide_map']) > 1:
+			print("plotting library integration")
+			story.append(Paragraph("Library Integration", style=styles["Heading2"]))
+			story.append(Paragraph(
+				"The UMAP embedding of cell line gene effects colored by library presence (left) and how \
+		far a gene's average within a library deviates from the overall average, by library (right). \
+		The UMAP embedding uses only the 50% most variable genes. \
+		On the right, a lowess trend is fitted per library to the squared difference of the gene's mean within \
+		models screened with the library and its mean overall."
+			))
+			fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height))
+			plt.sca(axes[0])
+			check_integration_umap(data['gene_effect'], data['sequence_map'], metrics=metrics)
+			plt.sca(axes[1])
+			check_integration_mean_deviation(data['gene_effect'], data['sequence_map'], data["guide_map"], metrics=metrics)
+			story.append(Paragraph("Prediction Accuracy", style=styles["Heading2"])) 
+			add_image("library_integration.png")
+			story.append(PageBreak())
 
 	print("plotting readcount predictions")
 	story.append(Paragraph("Predictions", style=styles["Heading2"]))
@@ -680,15 +710,17 @@ and vs the difference of means between \
 the supplied and naive gene effects. Below is the direct comparison of gene means and a comparison of the most extreme \
 values for each gene's score."
 	))
-	fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height))
-	plt.sca(axes[0])
-	gene_corr_vs_mean(naive_collapsed, data['gene_effect'],
-					metrics=metrics)
-	plt.sca(axes[1])
-	gene_corr_vs_mean_diff(naive_collapsed, data['gene_effect'],
-					metrics=metrics)
-	plt.xlabel("Naive Mean - Gene Effect Mean")
-	add_image("gene_corrs.png")
+
+	if len(data["gene_effect"]) > 1:
+		fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height))
+		plt.sca(axes[0])
+		gene_corr_vs_mean(naive_collapsed, data['gene_effect'],
+						metrics=metrics)
+		plt.sca(axes[1])
+		gene_corr_vs_mean_diff(naive_collapsed, data['gene_effect'],
+						metrics=metrics)
+		plt.xlabel("Naive Mean - Gene Effect Mean")
+		add_image("gene_corrs.png")
 
 	fig, ax = plt.subplots(1, 1, figsize=(plot_width, plot_width - 2))
 	plt.sca(ax)
@@ -698,13 +730,16 @@ values for each gene's score."
 	plt.xlabel("Naive")
 	plt.ylabel("Gene Effect")
 	add_image("gene_means.png")
-	fig, ax = plt.subplots(1, 1, figsize=(plot_width, plot_width - 2))
-	plt.sca(ax)
-	gene_outlier_plot(naive_collapsed, data['gene_effect'], metrics=metrics)
-	plt.title("Most Extreme Z-Scores by Gene")
-	plt.xlabel("Gene Effect Extreme ZScore")
-	plt.ylabel("Naive Extreme ZScore")
-	add_image("gene_zscore_extremes.png")
+
+	if len(data["gene_effect"]) > 1:
+		fig, ax = plt.subplots(1, 1, figsize=(plot_width, plot_width - 2))
+		plt.sca(ax)
+		gene_outlier_plot(naive_collapsed, data['gene_effect'], metrics=metrics)
+		plt.title("Most Extreme Z-Scores by Gene")
+		plt.xlabel("Gene Effect Extreme ZScore")
+		plt.ylabel("Naive Extreme ZScore")
+		add_image("gene_zscore_extremes.png")
+
 	story.append(PageBreak())
 	
 	print("summarizing")
@@ -716,7 +751,9 @@ values for each gene's score."
 		'\t%s: %1.3f' % (key, v.corr(ge_mean))
 		for key, v in naive_means.items()
 	])
-	story.insert(1, Paragraph(
+
+	if len(data["gene_effect"]) > 1:
+		story.insert(1, Paragraph(
 '''
 Summary: the standard deviation (SD) of gene means in gene effect is %1.3f.\n
 The mean of gene SDs is %1.3f the SD of gene means.\n
@@ -724,25 +761,7 @@ The SD of cell line means is %1.3f the SD of gene means\n.
 The correlation of each library's mean LFC per gene with Chronos' mean gene effect is:\n
 %s
 ''' % (ge_mean.std(), metrics['mean_SD:SD_means'], cell_line_mean, naive_corr_text)
-	))
-
-	print("plotting genes with low agreement with naive gene effect")
-	story.append(Paragraph("Exploring Low Agreement Genes", style=styles['Heading2']))
-	story.append(Spacer(.125, 12))
-	story.append(Paragraph("In the remaining plots, the genes with lowest agreement are explored further. \
-NA results for guide efficacy are replaced with -.1"))
-	story.append(Spacer(.125, 12))
-
-	outliers = set(metrics['worst_agreement']) \
-				| set([s.split('_')[0] for s in metrics['low_outliers']]) \
-				| set([s.split('_')[0] for s in metrics['high_outliers']])
-	for gene in outliers:
-		print("\t%s" % gene)
-		header = Paragraph(gene, style=styles["Heading3"])
-		story.append(header)
-		fig = interrogate_gene(data, naive, naive_collapsed, gene, plot_width, plot_height)
-		add_image(gene + '.png')
-		story.append(PageBreak())
+		))
 			
 
 	print("building report")
@@ -993,3 +1012,260 @@ NA results for guide efficacy are replaced with -.1"))
 	print("building report")
 	doc.build(story)
 	return metrics
+
+
+def hit_calling_report(
+	title,
+	report_name=None, 
+	directory='.', 
+	gene_effect_file="gene_effect.hdf5",
+	p_value_file="p_value.hdf5",
+	frequentist_fdr_file="frequentist_fdr.hdf5",
+	probability_file="probability_dependent.hdf5",
+	bayesian_fdr_file="bayesian_fdr.hdf5",
+	full_gene_effect_file=None,
+	plot_width=7.5, plot_height=3.25,
+	doc_args=dict(
+		pagesize=letter, rightMargin=.5*inch, leftMargin=.5*inch,
+		topMargin=.5*inch,bottomMargin=.5*inch
+	),
+	specific_plot_dimensions={}
+):
+	'''
+	Report summarizing the hits and biology discovered in the Chronos run
+	Parameters:
+		`title` (`str`): the report title, printed on first page
+		`report_name` (`str`): an optional file name for the report. If none is provided, `title` + '.pdf' will be used.
+		`directory` (`str`): where the report and figure panels will be generated.
+		`gene_effect_file` (`str`): path to hdf5 file containing desired gene effects
+		`p_value_file` (`str`): path to hdf5 file containing p_value estimates
+		`frequentist_fdr_file` (`str`): path to hdf5 file containing FDR estimates from p-values
+		`probability_file` (`str`): path to hdf5 file containing estimated probabilities of dependency
+		`bayesian_fdr_file` (`str`): path to hdf5 file containing FDR estimates from the probabilities
+		`full_gene_effect_file` (`str`): path to an hdf5 matrix containing gene effects for many cell lines. This is used
+			to identify what hits are specific to a given screen vs general. If not provided, `gene_effect_file` will be
+			used.
+		`plot_width`, `plot_height` (`float`): size of plots that will be put in the report in inches.
+		`doc_args` (`dict`): additional arguments will be passed to `SimpleDocTemplate`.
+		`specific_plot_dimensions` (`dict` of 2-tuple`): if a plot's name is present, will use the the value
+			 to specify dimensions for that plot instead of deriving them from `plot_width` and `plot_height`
+	Returns:
+		None
+	'''
+
+	
+	orig_working_dir = os.getcwd()
+	if report_name is None:
+		report_name = title + ".pdf"
+	doc = SimpleDocTemplate(os.path.join(directory, report_name), **doc_args)
+	styles=getSampleStyleSheet()
+	story = []
+	metrics = {}
+
+
+	def add_image(filename):
+		fig = plt.gcf()
+		label = '.'.join(filename.split('.')[:-1])
+		if label in specific_plot_dimensions:
+			fig.set_size_inches(specific_plot_dimensions[label])
+		width, height = fig.get_size_inches()
+		plt.tight_layout()
+		fig.savefig(os.path.join(directory, filename))
+		plt.close(fig)
+		im = Image(os.path.join(directory, filename), width*inch, height*inch)
+		story.append(im)
+		story.append(Spacer(.125, 12))
+
+	original_rcParams = copy(rcParams)
+	rcParams.update(matplotlib_rcParams_update)
+
+	print("loading data")
+	gene_effect = read_hdf5(gene_effect_file)
+	p_value = read_hdf5(p_value_file)
+	frequentist_fdr = read_hdf5(frequentist_fdr_file)
+	probability = read_hdf5(probability_file)
+	bayesian_fdr = read_hdf5(bayesian_fdr_file)
+
+	if full_gene_effect_file is None:
+		full_gene_effect = gene_effect
+	else:
+		full_gene_effect = read_hdf5(full_gene_effect_file)
+
+	story.append(Paragraph(title, style=styles["Heading1"]))
+
+	story.append(Paragraph("False Discovery Rates", style=styles["Heading2"]))
+	print("false discovery rates")
+	story.append(Paragraph(
+		"Discoveries vs gene effect using either frequentist or Bayesian methods. "
+		"The Bayesian estimates of false discovery are usually better, but vulnerable "
+		"to a bad set of positive controls."
+	))
+	for line in gene_effect.index:
+		fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height))
+
+		plt.sca(axes[0])
+		fdr_volcano(gene_effect.loc[line], frequentist_fdr.loc[line])
+		plt.ylabel("Frequentist FDR (-log10)")
+
+		plt.sca(axes[1])
+		fdr_volcano(gene_effect.loc[line], bayesian_fdr.loc[line])
+		plt.ylabel("Bayesian FDR (-log10)")
+
+		add_image("fdr_volcano_%s.png" % line)
+
+	story.append(Paragraph("Specific Biology", style=styles["Heading2"]))
+	print("specific biology")
+	aligned, full_gene_effect = gene_effect.align(full_gene_effect, axis=1, join="inner")
+
+	zscores = (aligned - full_gene_effect.mean()) / np.sqrt(1 + full_gene_effect.var())
+
+	if len(full_gene_effect) > 1:
+
+		story.append(Paragraph(
+			f"For each cell line, the most selective dependencies relative to {len(full_gene_effect)} lines in the "
+			f"full gene effect matrix. These are picked by using a regularized z-score (z = (x - mu) / sqrt(1 + sigma^2)) "
+			f"and taking hits that have Bayesian FDR < 0.1 and the strongest Z scores. "
+			f"This is most useful if the library for these screens is present in the full gene effect matrix "
+			f"and a pretrained model was used for Chronos. For each cell line, the top zscored genes are analyzed "
+			f"for term enrichment with geneTEA."
+		))
+
+		for line in aligned.index:
+			fig, axes = plt.subplots(1, 1, figsize=(plot_width, plot_height))
+			z = zscores.loc[line]
+			z = z[bayesian_fdr.loc[line] < .1]
+
+			candidates = z.sort_values().loc[lambda x: x < -.5].index[:50]
+			if len(candidates) == 0:
+				print(aligned.loc[line].sort_values())
+				print(full_gene_effect)
+				continue
+			context_box_plot(aligned.loc[line, candidates], full_gene_effect)
+			add_image(f"select_dependencies_{line}.png")
+
+			
+			plot_enriched_terms([s.split(' ')[0].strip() for s in candidates])
+			plt.gcf().set_size_inches(plot_width, plot_height)
+			plt.tight_layout()
+			add_image(f"select_dependencies_genetea_enrichment_{line}.png")
+
+		
+
+
+	print("building report")
+	doc.build(story)
+	rcParams.update(original_rcParams)
+
+
+def differential_dependency_report(
+	title,
+	stats_file,
+	report_name=None, 
+	directory='.', 
+	plot_width=7.5, plot_height=3.25,
+	doc_args=dict(
+		pagesize=letter, rightMargin=.5*inch, leftMargin=.5*inch,
+		topMargin=.5*inch,bottomMargin=.5*inch
+	),
+	specific_plot_dimensions={}
+):
+	'''
+	Report summarizing the hits and biology discovered in the Chronos run
+	Parameters:
+		`title` (`str`): the report title, printed on first page
+		'stats_file' ('str'): the output of `ChronosComparator.compare_conditions`
+		`report_name` (`str`): an optional file name for the report. If none is provided, `title` + '.pdf' will be used.
+		`directory` (`str`): where the report and figure panels will be generated.
+		`plot_width`, `plot_height` (`float`): size of plots that will be put in the report in inches.
+		`doc_args` (`dict`): additional arguments will be passed to `SimpleDocTemplate`.
+		`specific_plot_dimensions` (`dict` of 2-tuple`): if a plot's name is present, will use the the value
+			 to specify dimensions for that plot instead of deriving them from `plot_width` and `plot_height`
+	Returns:
+		None
+	'''
+
+	
+	orig_working_dir = os.getcwd()
+	if report_name is None:
+		report_name = title + ".pdf"
+	doc = SimpleDocTemplate(os.path.join(directory, report_name), **doc_args)
+	styles=getSampleStyleSheet()
+	story = []
+	metrics = {}
+
+
+	def add_image(filename):
+		fig = plt.gcf()
+		label = '.'.join(filename.split('.')[:-1])
+		if label in specific_plot_dimensions:
+			fig.set_size_inches(specific_plot_dimensions[label])
+		width, height = fig.get_size_inches()
+		plt.tight_layout()
+		fig.savefig(os.path.join(directory, filename))
+		plt.close(fig)
+		im = Image(os.path.join(directory, filename), width*inch, height*inch)
+		story.append(im)
+		story.append(Spacer(.125, 12))
+
+	original_rcParams = copy(rcParams)
+	rcParams.update(matplotlib_rcParams_update)
+
+	print("loading data")
+	stats = pd.read_csv(stats_file)
+	stats["gene"] = stats.gene.apply(lambda s: s.split(" ")[0])
+	conditions = [s.split("gene_effect_in_")[1].strip() for s in stats.columns if "gene_effect_in_" in s]
+	stats_by_line = {line: group.set_index("gene") for line, group in stats.groupby("cell_line_name")}
+
+	story.append(Paragraph(title, style=styles["Heading1"]))
+
+	story.append(Paragraph("Differential Dependency", style=styles["Heading2"]))
+	print("plots")
+	story.append(Paragraph(
+		"Which genes are significantly different in the  "
+		f"{conditions[0]} condition vs {conditions[1]} condition. "
+	))
+	for line, table in stats_by_line.items():
+		story.append(Paragraph(line, style=styles["Heading3"]))
+		fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height))
+
+		plt.sca(axes[0])
+		fdr = table["likelihood_fdr"]
+		ged = table["gene_effect_difference"]
+		fdr_volcano(ged, fdr, label_outliers=10, outliers_from="xy_zscore")
+		plt.ylabel("FDR (-log10)")
+		plt.xlabel(f"Gene Effect Diff. {conditions[1][:12]} - {conditions[0][:12]}")
+		plt.title("")
+
+		plt.sca(axes[1])
+		density_scatter(table[f"gene_effect_in_{conditions[1]}"], table[f"gene_effect_in_{conditions[0]}"],
+			label_outliers=10, diagonal=True)
+		plt.xlabel(f"Gene Effect ({conditions[1]})")
+		plt.ylabel(f"Gene Effect ({conditions[0]})")
+		plt.tight_layout()
+
+		add_image("differential_dependency_%s.png" % line)
+
+		sigup = fdr.index[(fdr < .1) & (ged > 0)]
+		if len(sigup) >= 3:
+			axes = plot_enriched_terms([s.split(' ')[0].strip() for s in sigup])
+			if not (axes is None):
+				plt.gcf().suptitle(f"Genes more essential in {conditions[1]}")
+				plt.gcf().set_size_inches(plot_width, plot_height)
+				plt.tight_layout()
+				fig.subplots_adjust(top=0.88)
+				add_image(f"diffdep_up_genetea_enrichment_{line}.png")
+
+		sigdown = fdr.index[(fdr < .1) & (ged < 0)]
+		if len(sigup) >= 3:
+			axes = plot_enriched_terms([s.split(' ')[0].strip() for s in sigdown])
+			if not (axes is None):
+				plt.gcf().suptitle(f"Genes more essential in {conditions[0]}")
+				plt.gcf().set_size_inches(plot_width, plot_height)
+				plt.tight_layout()
+				fig.subplots_adjust(top=0.88)
+				add_image(f"diffdep_down_genetea_enrichment_{line}.png")
+
+
+	print("building report")
+	doc.build(story)
+	rcParams.update(original_rcParams)

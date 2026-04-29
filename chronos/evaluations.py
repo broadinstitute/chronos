@@ -1,5 +1,6 @@
 
 from warnings import warn
+import requests
 import numpy as np
 import pandas as pd
 from colorsys import hsv_to_rgb, rgb_to_hsv
@@ -393,12 +394,18 @@ def paired_pDNA_plots(readcounts, sequence_map, cell_line,
 	height = min(page_height, plot_height*len(reps))
 	fig, axes = plt.subplots(len(reps), 2, figsize=(plot_width, height))
 	for i, rep in enumerate(reps):
-		plt.sca(axes[i, 0])
+		try:
+			plt.sca(axes[i, 0])
+		except IndexError:
+			plt.sca(axes[0])
 		pDNA_plot(readcounts, sequence_map, rep, negative_control_sgRNAs)
 		plt.ylabel('Rep. ' + labels[rep])
 		plt.title(left_title)
 		
-		plt.sca(axes[i, 1])
+		try:
+			plt.sca(axes[i, 1])
+		except IndexError:
+			plt.sca(axes[1])
 		pDNA_plot(readcounts, sequence_map, rep, positive_control_sgRNAs)
 		plt.ylabel("")
 		plt.title(right_title)
@@ -1517,3 +1524,167 @@ def interrogate_gene_compare(paired_data, lfc, guide_map, gene, plot_width, plot
 	plt.title("Gene Effect - Guide LFC Corr")
 	
 	return fig
+
+
+# Post hit-calling plots
+
+def fdr_volcano(line_gene_effect, line_gene_fdr, s=5, cutoff=.1, cmap="Greys", **kwargs):
+	'''
+	create a volcano plot for a single cell line.
+	Parameters:
+		line_gene_effect (`pandas.Series`): gene effects in the line, indexed by gene
+		line_fdr (`pandas.Series`): false discovery rate estimates in the line, indexed by gene
+		s (`float`): point size
+		cutoff (`float`): FDR value below which points are colored
+		cmap: the colormap to use in density_scatter
+	Other keyword arguments passed to density_scatter.
+	'''
+
+	logged = -np.log10(1e-10 + line_gene_fdr)
+	bound = max(2 * logged.quantile(.95), 3)
+	logged.clip(0, bound, inplace=True)
+
+	density_scatter(line_gene_effect, logged, s=s, trend_line=False, cmap=cmap, **kwargs)
+
+	plt.scatter(line_gene_effect[line_gene_fdr < cutoff], logged[line_gene_fdr < cutoff], s=s, color="red")
+
+	plt.xlabel("Gene effect")
+
+	plt.ylabel("-Log10 (FDR)")
+
+	if line_gene_effect.name:
+		plt.title(line_gene_effect.name)
+
+
+def context_box_plot(line_gene_effect, full_gene_effect):
+	df = full_gene_effect[line_gene_effect.index].stack().reset_index()
+	df.columns = ["Cell Line", "Gene", "Gene Effect"]
+	sns.boxplot(data=df, y="Gene Effect", x="Gene", order=line_gene_effect.index, flierprops=dict(marker="|"))
+
+	for i, gene in enumerate(line_gene_effect.index):
+		plt.scatter(i, line_gene_effect[gene], color="red", edgecolor="black", linewidth=1.5, zorder=2)
+
+	plt.xlabel("")
+	plt.xticks(rotation=90)
+	if line_gene_effect.name:
+		plt.title(line_gene_effect.name)
+
+
+def get_enriched_terms(gene_list, n_top_terms=10, term_groups=True, **kwargs):
+	"""
+	Get the top enriched terms / term groups from GeneTEA for the gene list provided.
+	Parameters:
+		`gene_list` (`list`): list of genes to pass to GeneTEA.
+		`n_top_terms` (`int`): max number of top terms or term groups to request from GeneTEA; default 10.
+	"""
+	if len(gene_list) < 3:
+		raise ValueError("`gene_list` %r has fewer than 3 genes" % gene_list)
+	genetea_url = "https://cds.team/genetea-api/enriched-terms/"
+	params = {
+		'gene_list': gene_list, 
+		'model':'v2', 
+		'group_terms':term_groups, #returns top 10 term groups if true, top 10 terms if false
+		"n":n_top_terms,
+		**kwargs
+	}
+	r = requests.get(genetea_url, params=params)
+	enriched_terms = pd.DataFrame(r.json()['enriched_terms'])
+	if enriched_terms.shape[0]==0:
+		return None
+	enriched_terms['Matching Genes in List'] = enriched_terms['Matching Genes in List'].apply(lambda x: x.split(' '))
+	if not term_groups:
+		enriched_terms = enriched_terms.drop(columns=['Term Group'])
+	return enriched_terms
+
+
+
+def plot_enriched_terms(gene_list=None, n_top_terms=10, term_groups=True, color_palette='viridis_r', 
+	axes=None, enriched_terms=None, **kwargs):
+	"""
+	Draws two related plots for GeneTEA term enrichment results:
+		- A bar plot showing FDR for each top term 
+		- A binary heatmap showing term x gene matches, for genes that match at least 1 top term
+	Parameters:
+		`gene_list` (`list`): list of genes to pass to GeneTEA; required if `enriched_terms` is None.
+		`n_top_terms` (`int`): max number of top terms or term groups to request from GeneTEA; default 10.
+		`sort_by_cluster` (`bool`): currently NA. whether to sort terms by cluster (default) or just by FDR.
+		`color_palette` (`palette name`): seaborn color palette name to use for fraction of terms in group matched by each gene; default 'viridis'.
+		`axes` (`list` of `matplotlib.Axis`): if provided, draw plots to these two axes.
+		`enriched_terms` (`pandas.DataFrame`): output from `get_enriched_terms`; if provided, `gene_list`, `term_groups` and `n_top_terms` will be ignored.
+	"""
+	if gene_list is None and enriched_terms is None:
+		warn("A gene list is required if GeneTEA results (`enriched_terms`) from `get_enriched_terms` are not provided.")
+		return
+	
+	if enriched_terms is None:
+		enriched_terms = get_enriched_terms(gene_list, n_top_terms=n_top_terms, term_groups=term_groups, **kwargs)
+		if enriched_terms is None:
+			print("No enriched terms found, exiting")
+			return
+
+	if 'Term Group' in enriched_terms.columns.tolist():
+		enriched_term_groups = enriched_terms\
+			.explode('Matching Genes in List')\
+			.groupby('Term Group')\
+			.agg({'Matching Genes in List':set, 'FDR':min}).reset_index()
+	else:
+		enriched_terms['Term Group'] = enriched_terms.Term
+		enriched_term_groups = enriched_terms
+	
+	#cluster_map = dict(zip(enriched_terms.Cluster.unique(), sns.color_palette(color_palette)))
+    
+	# if sort_by_cluster:
+	# 	#sort clusters by top FDR, then by FDR within clusters
+	# 	cluster_order = dict(zip(
+	# 		enriched_terms.sort_values('FDR').Cluster.unique(), 
+	# 		np.arange(1, nclusters)
+	# 	))
+	# 	enriched_terms = enriched_terms\
+	# 		.sort_values('FDR')\
+	# 		.sort_values(by='Cluster', key=lambda x: x.map(cluster_order), kind='mergesort')
+	# else:
+	enriched_term_groups = enriched_term_groups.sort_values('FDR')
+
+	#create matrix for genes matched to term groups
+	terms_per_group = enriched_terms.groupby('Term Group').Term.nunique()
+	term_membership = (pd.pivot(
+		enriched_terms.explode('Matching Genes in List')\
+			.groupby(['Term Group','Matching Genes in List']).Term.count().reset_index(),
+		index='Term Group',
+		columns='Matching Genes in List',
+		values='Term'
+	).T / terms_per_group).T.loc[enriched_term_groups['Term Group'].tolist()]
+
+	# sort genes by term membership
+	term_membership = term_membership.T.sort_values(term_membership.T.columns.values.tolist()).T
+
+	if axes is None:
+		f, axes = plt.subplots(1, 3, figsize=(9, max(1 + (term_membership.shape[0]*.18), 3)), gridspec_kw={'width_ratios':[2.5,.8,.05]})
+
+	#draw bar plot with FDR for each term
+	sns.barplot(
+		y=enriched_term_groups['Term Group'], 
+		x=-np.log10(enriched_term_groups.FDR), 
+		color="#777", saturation=1,
+		ax=axes[1]
+	)
+	axes[1].set(xlabel='log FDR', ylabel='')
+	axes[1].get_yaxis().set_ticks([])
+	#draw heatmap to show matching genes for each term
+	sns.heatmap(
+		term_membership.fillna(0),#.astype(int).applymap(lambda x: x if x==0 else 1), 
+		#cmap=['#dedede']+list(cluster_map.values()), 
+		cmap=['#dedede']+list(sns.color_palette(color_palette)), 
+		ax=axes[0], cbar=True, cbar_ax=axes[2], cbar_kws={'label':'Fraction matching'}, 
+		lw=(.5 if term_membership.shape[1]<=50 else 0), 
+		xticklabels=(True if term_membership.shape[1]<=50 else False)
+	)
+	axes[0].set(
+		ylabel='', xlabel='Matching Genes in List (n=%d)' % term_membership.shape[1], 
+		title="Top %d enriched terms from GeneTEA" % term_membership.shape[0]
+	)
+	axes[0].tick_params(axis='y', labelsize=8, width=0)
+	axes[0].tick_params(axis='x', labelsize=5.5, rotation=90)
+	plt.tight_layout()
+
+	return axes
