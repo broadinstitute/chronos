@@ -1487,7 +1487,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 		combined_mask = None
 		for mask in masks.values():
 			if combined_mask is None:
-				combined_mask = mask
+				combined_mask = mask.copy()
 			else:
 				combined_mask |= mask.values
 		missing_lines = combined_mask.any(axis=1).loc[lambda x: ~x].index
@@ -2001,7 +2001,7 @@ guide abundance"
 									for key, val in numpy_ge_masks.items()}
 
 			_library_mask_sums = {key: tf.constant(
-				val.astype(self.np_dtype).sum().clip(1, 1e6).values.reshape((1, -1)), 
+				val.astype(self.np_dtype).sum().clip(1, 1e6).values.reshape((1,-1)), 
 				dtype, 
 				name="library_mask_sum_%s" % key
 			) for key, val in numpy_ge_masks.items()}
@@ -2192,8 +2192,8 @@ guide abundance"
 			raise ValueError(
 				f"Exception {e.string} encountered in calculating mean fold change.\n"
 				f"fold change: \n{fold_change}\n\n"
-				f"sequence map grouper: \n{sequence_map.set_index("sequence_ID").cell_line_name}\n\n"
-				f"guide map grouper: \n{guide_gene_map.set_index("sgrna").gene}" 
+				f"sequence map grouper: \n{sequence_map.set_index('sequence_ID').cell_line_name}\n\n"
+				f"guide map grouper: \n{guide_gene_map.set_index('sgrna').gene}"
 			)
 
 		mean_fold_change.replace(0, 1e-3, inplace=True)
