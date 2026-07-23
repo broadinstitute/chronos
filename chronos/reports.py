@@ -269,7 +269,7 @@ def qc_initial_data(title, readcounts, sequence_map, guide_map, negative_control
 	for line in sequence_map.cell_line_name.unique():
 		if line == 'pDNA':
 			continue
-		reps = sequence_map.query("cell_line_name == %r" % line).sequence_ID
+		reps = sequence_map.query("cell_line_name == @line").sequence_ID
 		corrs = fast_cor(lfc.loc[reps].T)
 		np.fill_diagonal(corrs.values, np.nan)
 		mean_corrs.append(corrs.mean())
@@ -414,7 +414,7 @@ sgRNAs should tend to fall below the diagonal. Note that each axis is the log(no
 		story.append(PageBreak())
 		story.append(Paragraph(line, style=styles["Heading3"]))
 
-		reps = sequence_map.query("cell_line_name == %r" % cell_line).sequence_ID.unique()
+		reps = sequence_map.query("cell_line_name == @cell_line").sequence_ID.unique()
 		rep_labels = dict(zip(reps, trim_overlapping_lead_and_tail(reps)))
 		n = 0
 		titles = {}
@@ -628,8 +628,8 @@ The FDRs should be considered optimistic."
 
 		for library in library_data:
 
-			gr, cle = data["growth_rate"].query("library == %r" % library)["growth_rate"].dropna().align(
-				data['replicate_efficacy'].query("library == %r" % library)["replicate_efficacy"].dropna(), 
+			gr, cle = data["growth_rate"].query("library == @library")["growth_rate"].dropna().align(
+				data['replicate_efficacy'].query("library == @library")["replicate_efficacy"].dropna(), 
 				join="inner"
 			)
 

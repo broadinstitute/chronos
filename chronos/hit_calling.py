@@ -456,7 +456,7 @@ def _remap_growth_rates(growth_rate, old_map, new_map):
 	growth_rates = []
 	
 	for library, mapper in old_map.items():
-		sub = growth_rate.query("library == %r" % library).copy()
+		sub = growth_rate.query("library == @library").copy()
 		mapper = mapper[["sequence_ID", "replicate_ID"]].drop_duplicates(subset=["replicate_ID"])
 		sub = pd.merge(sub, mapper, on="replicate_ID", how="left")
 		sub["replicate_ID"] = new_map\
