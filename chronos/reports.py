@@ -211,7 +211,7 @@ def qc_initial_data(title, readcounts, sequence_map, guide_map, negative_control
 			pagesize=letter, rightMargin=.5*inch, leftMargin=.5*inch,
 			topMargin=.5*inch,bottomMargin=.5*inch
 		  ),
-		  specific_plot_dimensions={}
+		  specific_plot_dimensions={}, report_worst_lines=False
 ):
 	'''
 	QC dthe data that would be passed to Chronos. This can be helpful to develop a sense of data quality but also to exclude 
@@ -232,6 +232,7 @@ def qc_initial_data(title, readcounts, sequence_map, guide_map, negative_control
 		`doc_args` (`dict`): additional arguments will be passed to `SimpleDocTemplate`.
 		`specific_plot_dimensions` (`dict` of 2-tuple`): if a plot's name is present, will use the the value
 			 to specify dimensions for that plot instead of deriving them from `plot_width` and `plot_height`
+		`report_worst_lines` (`bool`): whether to generate detailed plots for the cell lines with worst performance
 	Returns:
 		`dict` containing the calculated QC metrics, which will also be in the report.
 	'''
@@ -385,7 +386,12 @@ and correlate with other measures of screen quality."))
 		plt.xlabel("Replicate R with Mean LFC")
 		plt.ylabel("Mean Replicate R with same line")
 		add_image("replicate_correlations.png")
-		
+	
+	if not report_worst_lines:
+		doc.build(story)
+		rcParams.update(original_rcParams)
+		return metrics
+
 	story.append(PageBreak())
 	story.append(Paragraph("Details for worst performing cell lines", style=styles["Heading2"]))
 	story.append(Paragraph(

@@ -2486,9 +2486,9 @@ To load a pretrained model, you must reinitialize Chronos with `pretrained=True`
 		missing = set(self.keys) - set(library_effect.columns)
 		if len(missing):
 			raise ValueError(
-				"Data contains libraries that are not present in the pretrained model: %r. Please load a pretrained model \
+				"Data contains libraries that are not present in the pretrained models (%r): %r. Please load a pretrained model \
 that includes all the libraries in the new screen(s), run Chronos without a pretrained model, or exclude those libraries from \
-your data" % missing
+your data" % (sorted(library_effect.columns), missing)
 			)
 		
 		mask = {}

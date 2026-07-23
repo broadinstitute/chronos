@@ -149,7 +149,7 @@ def split_color(rgb):
 	return hsv_to_rgb(h, s, .3), hsv_to_rgb(h, s, .6)
 
 
-def generate_powerset_palette(keys, start='random',
+def generate_powerset_palette(keys, start='random', base_rgb=None,
 							 base_saturation=1, base_hsv_value=.7):
 	'''
 	Generate a palette for the powerset of `keys`. Colors for the individual keys will be evenly spaced
@@ -157,7 +157,8 @@ def generate_powerset_palette(keys, start='random',
 	by different hsv values (brightness).
 	Parameters:
 		`keys` (iterable): the base keys that will be combined into a powerset
-		`start` (`float` or "random"): optional hue for the first entry in `keys`
+		`start` (`float` or "random"): optional hue for the first entry in `keys`. Ignored if `base_hues` is not `None`.
+		`base_rgb` (`None` or dict of color tuple): optional colors for the individual keys
 		`base_saturation`: saturation of colors for the individual keys
 		`base_hsv_value`: hsv value parameter for colors for the individual keys
 	Returns:
@@ -166,8 +167,12 @@ def generate_powerset_palette(keys, start='random',
 	'''
 	if start == 'random':
 		start = np.random.uniform()
-	base_hues = start + np.arange(len(keys))/len(keys)
-	base_rgb = dict(zip(keys, [hsv_to_rgb(hue, base_saturation, base_hsv_value) for hue in base_hues]))
+	if base_rgb is None:
+		base_hues = start + np.arange(len(keys))/len(keys)
+		base_rgb = dict(zip(keys, [hsv_to_rgb(hue, base_saturation, base_hsv_value) for hue in base_hues]))
+	if set(keys) - set(base_rgb.keys()):
+		raise KeyError("missing keys in `base_rgb`")
+	
 	out = {}
 	keysets = list(powerset(keys))
 	for keyset in keysets:
@@ -1179,7 +1184,7 @@ def check_integration_umap(gene_effect, sequence_map,
 
 def check_integration_mean_deviation(gene_effect, sequence_map, guide_map,
 					 ax=None, metrics=None, legend=True,
-					  legend_args=dict(fontsize=7),
+					  legend_args=dict(fontsize=7), scatter=True,
 					plot_args=dict(lw=1)
 					 ):
 	'''
@@ -1221,10 +1226,13 @@ def check_integration_mean_deviation(gene_effect, sequence_map, guide_map,
 	else:
 		plt.sca(ax)
 	for library in indicators:
-		y = (library_means[library]-weighted_means)**2
+		y = (library_means[library]-weighted_means).abs()
 		trend = np.clip(lowess_trend(means, y), 0, np.inf)
 		order = np.argsort(means)
-		plt.plot(means.iloc[order], trend[order], label=library, **plot_args)
+		l = plt.plot(means.iloc[order], trend[order], label=library, zorder=2, **plot_args)
+		if scatter:
+			color = l[0].get_color()
+			plt.scatter(means.iloc[order], y[order], label=library, color=color, zorder=1, s=5, alpha=.75)
 	plt.xlabel("Gene Mean Overall")
 	plt.ylabel("Gene Mean Variance Trend")
 	
@@ -1262,16 +1270,30 @@ def guide_lfc_plot(lfc, palette):
 					   lw=.5)
 
 
-def guide_palette(guide_map, gene):
+def guide_palette(guide_map, gene, base_rgb=None):
 	'''
 	Returns a palette with a unique color for each sgRNA in `guide_map` targeting `gene`.
 	'''
-	start = np.pi * np.arange(len(guide_map))/len(guide_map)
+	keys = list(guide_map.keys())
+	if base_rgb is None:
+		base_hues = start + np.arange(len(keys))/len(keys)
+		base_rgb = dict(zip(keys, [hsv_to_rgb(hue, base_saturation, base_hsv_value) for hue in base_hues]))
+	if set(keys) - set(base_rgb.keys()):
+		raise KeyError("`base_rgb` missing keys in the `guide_map`")
 	palette = {}
 	for i, key in enumerate(guide_map):
 		guides = guide_map[key].query("gene == %r" % gene).sgrna.unique()
-		palette[key] = pd.Series(
-			sns.cubehelix_palette(len(guides), start=start[i], rot=.25/len(guide_map), dark=.35, light=.7, hue=1),
+		h, s, v = rgb_to_hsv(*base_rgb[key])
+		if len(guides) == 0:
+			v_interval = []
+		elif len(guides) == 1:
+			v_interval = [v]
+		else:
+			v_interval = np.linspace(.4, .9, len(guides))
+		palette[key] = pd.Series([
+				hsv_to_rgb(h, s, v_guide)
+				for v_guide in v_interval
+			],
 			index=guides
 		)
 	return palette
