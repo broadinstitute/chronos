@@ -316,7 +316,7 @@ def all_replicate_plot(readcounts, sequence_map, cell_line, plot_width):
 	`replicate_plot` for all pairs of replicates of `cell_line`. See `chronos.Chronos` for a description
 	of `sequence_map`. `plot_width` gives the plot width in inches.
 	'''
-	reps = sequence_map.query("cell_line_name == %r" % cell_line).sequence_ID.unique()
+	reps = sequence_map.query("cell_line_name == @cell_line").sequence_ID.unique()
 	rep_labels = dict(zip(reps, trim_overlapping_lead_and_tail(reps)))
 	n = 0
 	titles = {}
@@ -346,10 +346,10 @@ def pDNA_plot(readcounts, sequence_map, rep, sgrnas=None):
 		if not controls:
 			raise ValueError("None of the specified sgRNAs are in the readcounts columns: \n%r" 
 							% sgrnas)
-	batch_label = sequence_map.query("sequence_ID == %r" % rep).iloc[0]['pDNA_batch']
+	batch_label = sequence_map.query("sequence_ID == @rep").iloc[0]['pDNA_batch']
 	pdna_seq = sequence_map\
 				.query("cell_line_name == 'pDNA'")\
-				.query("pDNA_batch == %r" % batch_label)\
+				.query("pDNA_batch == @batch_label")\
 				.sequence_ID
 	pdna = np.log2(readcounts.loc[pdna_seq]+1).median()
 	ltp = np.log2(readcounts.loc[rep]+1)
@@ -377,7 +377,7 @@ def paired_pDNA_plots(readcounts, sequence_map, cell_line,
 	but `plot_height` specifies subplot height. This will be adjusted if the total figure
 	height would exceed `page_height`. See `pDNA_plot` for other parameters.
 	'''
-	reps = sequence_map.query("cell_line_name == %r" % cell_line).sequence_ID.unique()
+	reps = sequence_map.query("cell_line_name == @cell_line").sequence_ID.unique()
 	labels = dict(zip(reps, trim_overlapping_lead_and_tail(reps)))
 	left_title = "Negative Controls"
 	right_title = "Positive Controls"
@@ -1282,7 +1282,7 @@ def guide_palette(guide_map, gene, base_rgb=None):
 		raise KeyError("`base_rgb` missing keys in the `guide_map`")
 	palette = {}
 	for i, key in enumerate(guide_map):
-		guides = guide_map[key].query("gene == %r" % gene).sgrna.unique()
+		guides = guide_map[key].query("gene == @gene").sgrna.unique()
 		h, s, v = rgb_to_hsv(*base_rgb[key])
 		if len(guides) == 0:
 			v_interval = []
@@ -1408,9 +1408,9 @@ def single_line_interrogation(data, gene, line, ax=None,
 	'''
 	if not ax is None:
 		plt.sca(ax)
-	guides = {library: data['guide_map'][library].query("gene == %r" % gene).sgrna.unique()
+	guides = {library: data['guide_map'][library].query("gene == @gene").sgrna.unique()
 				for library in data['guide_map']}
-	sequences = {library: data['sequence_map'][library].query("cell_line_name == %r" % line).sequence_ID.unique()
+	sequences = {library: data['sequence_map'][library].query("cell_line_name == @line").sequence_ID.unique()
 				for library in data['sequence_map']
 				}
 
