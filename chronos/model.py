@@ -2010,18 +2010,45 @@ guide abundance"
 				name="library_mask_sum_%s" % key
 			) for key, val in numpy_ge_masks.items()}
 
+			_library_mask_sums_inverse = {key: tf.constant(
+				(1-val).astype(self.np_dtype).sum().clip(1, 1e6).values.reshape((1,-1)), 
+				dtype, 
+				name="library_mask_sum_inverse_%s" % key
+			) for key, val in numpy_ge_masks.items()}
+
 			_indicator_product = {key: tf.multiply(
 				val, _gene_effect, name="library_mask_product_%s" % key
 			) for key, val in _library_masks.items()}
 
-			_library_means = {key: tf.reduce_sum(
+			_indicator_product_inverse = {key: tf.multiply(
+				(1-val), _gene_effect, name="library_mask_product_%s" % key
+			) for key, val in _library_masks.items()}
+
+			_library_means = {key: 
+				tf.reduce_sum(
 					val, axis=0, name="library_effect_sum"
-				)[tf.newaxis, :] / _library_mask_sums[key]
+				)[tf.newaxis, :] 
+				/ _library_mask_sums[key]
 				for key, val in _indicator_product.items()
 			}
 
+			_library_means_inverse = {key: 
+				tf.reduce_sum(
+					val, axis=0, name="library_effect_sum"
+				)[tf.newaxis, :] 
+				/ _library_mask_sums_inverse[key]
+				for key, val in _indicator_product_inverse.items()
+			}
+
+			_library_weights = {key:
+				tf.math.minimum(
+					_library_mask_sums[key], _library_mask_sums_inverse[key]
+				) / (.5 * (_library_mask_sums[key] + _library_mask_sums_inverse[key]))
+				for key in self.keys
+			}
+
 			_library_reg = tf.add_n([
-				library_reg * tf.reduce_mean(_library_means[key]**2, name="squared_means")
+				library_reg * tf.reduce_mean(_library_weights[key] * _library_means[key]**2, name="squared_means")
 				for key in self.keys
 			], name="library_reg")
 
