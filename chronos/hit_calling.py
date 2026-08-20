@@ -621,9 +621,9 @@ class ConditionComparison():
 		self.excess_correlation_warning = check_for_excess_correlation(readcounts, condition_map, negative_control_sgrnas)
 		if negative_control_genes is None:
 			negative_control_genes = []
-		if self.excess_correlation_warning and len(negative_control_genes) < 100:
-			raise RuntimeError("The biological replicates are not independent. A good set of at least 100 negative control \
-genes must be passed to check p-value calibration after compare_conditions is run.")
+		if self.excess_correlation_warning and len(negative_control_genes) < 90:
+			raise RuntimeError("The biological replicates are not independent. A good set of at least 90 negative control \
+genes must be passed to check p-value calibration after compare_conditions is run. Num. negative control genes available: %d" % len(negative_control_genes))
 
 		self.readcounts = readcounts
 		self.condition_map = Chronos._make_pdna_unique(condition_map, readcounts)
