@@ -1820,7 +1820,10 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 					 dtype=dtype, name="library_data_size_summed"
 				)
 
-				#_library_effect_indicated = {key: v * _gene_presence_indicated[key] for key, v in v_library_effect.items()}
+				_library_effect_indicated = {
+					key: v * _gene_presence_indicated[key] 
+					for key, v in v_library_effect.items()
+				}
 				_library_effect_mean = tf.add_n([
 					   _library_data_size[key] * v_library_effect[key] 
 					for key in self.keys
@@ -1829,7 +1832,8 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 				if self._pretrained:
 					_library_effect = v_library_effect
 				else:
-					_library_effect = {key: v - _library_effect_mean for key, v in v_library_effect.items()}
+					_library_effect = {key: v - _library_effect_mean 
+					for key, v in _library_effect_indicated.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
 

@@ -6,6 +6,7 @@ Try `pip install patsy`")
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from warnings import warn
 
 
 def get_shifts(gene_effect, copy_number):
@@ -103,7 +104,7 @@ def alternate_CN(gene_effect, copy_number, nknots_cn=10, nknots_ge=5, dtype=tf.d
 		raise RuntimeError("Correct for CN should not be used with fewer than 3 cell lines. Consider preprocessing with CRISPRCleanR")
 	missing_lines = sorted(set(gene_effect.index) - set(copy_number.index))
 	if len(missing_lines) > 0:
-		print("Warning: missing lines from gene_effect in copy_number, which won't be corrected.\nExamples: %r" % missing_lines[:5])
+		warn("Warning: missing lines from gene_effect in copy_number, which won't be corrected.\nExamples: %r" % missing_lines[:5])
 	missing_genes = sorted(set(gene_effect.columns) - set(copy_number.columns))
 	if len(missing_genes) > 0:
 		raise ValueError("Missing %i genes from gene_effect in copy_number.\nExamples: %r" % (
