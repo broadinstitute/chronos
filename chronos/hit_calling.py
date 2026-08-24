@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from statsmodels.stats.multitest import fdrcorrection, multipletests
 import statsmodels.api as sm
-from .model import Chronos, check_inputs, calculate_fold_change, normalize_readcounts
+from .model import Chronos, check_inputs, calculate_fold_change, normalize_readcounts, StdoutRedirector
 from .reports import sum_collapse_dataframes
 from .evaluations import fast_cor
 from warnings import warn
@@ -571,7 +571,7 @@ class ConditionComparison():
 	def __init__(self, readcounts, condition_map, guide_gene_map,
 		negative_control_genes=None, negative_control_sgrnas=None,
 		keep_models=False, 
-		print_to=None, **kwargs):
+		intermediate_print_to='stdout', print_to='None', **kwargs):
 		'''
 		Initialize the comparator.
 		Parameters:
