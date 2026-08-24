@@ -2534,7 +2534,7 @@ your data" % (sorted(library_effect.columns), missing)
 				.fillna(1)\
 				.reindex(columns=self.all_genes)\
 				.fillna(0)
-		 _gene_effect_mask = tf.constant(mask.values, dtype=self.np_dtype)
+		_gene_effect_mask = tf.constant(mask.values, dtype=self.np_dtype)
 		mask_count = (mask == 1).sum().sum()
 		self.mask_count = mask_count
 		self._gene_effect_mask = _gene_effect_mask
