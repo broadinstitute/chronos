@@ -2001,7 +2001,7 @@ guide abundance"
 									for key, val in numpy_ge_masks.items()}
 
 			_library_mask_sums = {key: tf.constant(
-				val.astype(self.np_dtype).sum().clip(1, 1e6).values.reshape((1,-1)), 
+				val.values.astype(self.np_dtype).sum().clip(1, 1e6).reshape((1, -1)),  
 				dtype, 
 				name="library_mask_sum_%s" % key
 			) for key, val in numpy_ge_masks.items()}
