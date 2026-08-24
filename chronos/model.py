@@ -1487,7 +1487,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 		combined_mask = None
 		for mask in masks.values():
 			if combined_mask is None:
-				combined_mask = mask.copy()
+				combined_mask = mask
 			else:
 				combined_mask |= mask.values
 		missing_lines = combined_mask.any(axis=1).loc[lambda x: ~x].index
@@ -1502,7 +1502,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 			)
 		mask_count = combined_mask.sum().sum()
 		combined_mask = combined_mask.astype(self.np_dtype)
-		_gene_effect_mask = tf.Variable(combined_mask.values, dtype=dtype, name="GE_mask")
+		_gene_effect_mask = tf.constant(combined_mask.values, dtype=dtype, name="GE_mask")
 		return _gene_effect_mask, mask_count, masks
 
 
@@ -2534,9 +2534,10 @@ your data" % (sorted(library_effect.columns), missing)
 				.fillna(1)\
 				.reindex(columns=self.all_genes)\
 				.fillna(0)
-		self.sess.run(self._gene_effect_mask.assign(mask.values.astype(self.np_dtype)))
+		 _gene_effect_mask = tf.constant(mask.values, dtype=self.np_dtype)
 		mask_count = (mask == 1).sum().sum()
 		self.mask_count = mask_count
+		self._gene_effect_mask = _gene_effect_mask
 
 		# want to use the gene_effect matrix and not v_mean_effect's mean because the training data's masking is relevant
 		means = gene_effect.mean().reindex(index=self.all_genes).values.reshape(1, -1)
