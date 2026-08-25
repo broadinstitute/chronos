@@ -43,33 +43,33 @@ def add_global_shift(cn, y, means, dtype, nknots_cn=10, nknots_ge=5, alpha=.2):
 				{"cn": cn.values, 'means': means}, return_type='matrix'
 			))
 	print('constructed spline matrix of shape %i, %i' % spline_gc.shape)
-	_spline = tf.constant(spline_gc, dtype=dtype)
-	_y = tf.constant(y.values, dtype=dtype)
-	var = y.var()
-	init = np.random.uniform(-.001, -.0001, size=(spline_gc.shape[1]))
-	v_coeffs = tf.Variable(init.reshape((-1, 1)), dtype=dtype)
-	v_weights = tf.Variable(1e-6 * np.ones(len(spline_gc)), dtype=dtype)
-	_weights = tf.exp(-tf.abs(v_weights))
-	_weight_cost = tf.reduce_mean(input_tensor=tf.square(v_weights))
+	# `alternate_CN` calls this once per cell line group. Building in a graph of its own, and
+	# closing the session on the way out, keeps those calls from accumulating on the default graph
+	# and from leaking a session per group.
+	with tf.Graph().as_default():
+		_spline = tf.constant(spline_gc, dtype=dtype)
+		_y = tf.constant(y.values, dtype=dtype)
+		var = y.var()
+		init = np.random.uniform(-.001, -.0001, size=(spline_gc.shape[1]))
+		v_coeffs = tf.Variable(init.reshape((-1, 1)), dtype=dtype)
+		v_weights = tf.Variable(1e-6 * np.ones(len(spline_gc)), dtype=dtype)
+		_weights = tf.exp(-tf.abs(v_weights))
+		_weight_cost = tf.reduce_mean(input_tensor=tf.square(v_weights))
 
-	_out = _weights * tf.matmul(_spline, v_coeffs)[:, 0]	
-	_cost = tf.reduce_mean(input_tensor=tf.square(_out - _y) )
-	optimizer = tf.compat.v1.train.AdamOptimizer(.005)
-	_step = optimizer.minimize(_cost + alpha * _weight_cost, var_list=[v_coeffs, v_weights])
-	
-	sess = tf.compat.v1.Session()
-	sess.run(tf.compat.v1.global_variables_initializer())
+		_out = _weights * tf.matmul(_spline, v_coeffs)[:, 0]
+		_cost = tf.reduce_mean(input_tensor=tf.square(_out - _y) )
+		optimizer = tf.compat.v1.train.AdamOptimizer(.005)
+		_step = optimizer.minimize(_cost + alpha * _weight_cost, var_list=[v_coeffs, v_weights])
 
+		with tf.compat.v1.Session() as sess:
+			sess.run(tf.compat.v1.global_variables_initializer())
 
-	for i in range(501):
-		sess.run(_step)
-		if not i%100:
-			print('\tcost:', sess.run(_cost))
-	out = sess.run(_out)
-	weights = sess.run(_weights)
+			for i in range(501):
+				sess.run(_step)
+				if not i%100:
+					print('\tcost:', sess.run(_cost))
 
-
-	return weights, sess.run(_out)
+			return sess.run(_weights), sess.run(_out)
 
 
 

@@ -708,8 +708,8 @@ class Chronos(object):
 	default_timepoint_scale = .1 * np.log(2)
 	default_cost_value = 0.67
 	variable_max_value = 5
-	persistent_handles = set([])
-	def __init__(self, 
+
+	def __init__(self,
 				 readcounts,
 				 guide_gene_map,
 				 sequence_map,
@@ -810,8 +810,8 @@ class Chronos(object):
 								Chronos will normalize such that the median log reads of negative controls in each replicate match
 								the median in the pDNA batch. 
 			use_line_mean_as_reference (`int`): passed to `estimate_alpha`
-			print_to (`str` or `None`): where to print ordinary messages from Chronos. Default is `stdout`. Pass a file path to print
-								to the file or `None` to skip these messages.
+			print_to (`str` or callable or `None`): where to print ordinary messages from Chronos. Default is `stdout`. 
+					Pass a file path to write to the file or `None` to skip these messages.
 
 		Attributes:
 			Attributes beginning wit "v_" are tensorflow variables, and attributes beginning with _ are 
@@ -843,7 +843,57 @@ class Chronos(object):
 			t0_core
 			t0_offset
 		'''
+		# Capture the constructor arguments before binding any other local. `locals()` here is
+		# exactly the parameter list above, so the forwarding call below cannot drift out of sync
+		# with the signature.
+		build_args = {key: val for key, val in locals().items() if key != "self"}
 
+		# Every tensorflow node Chronos creates must live in a graph owned by this instance.
+		# Tensorflow's implicit default graph is shared by everything built in the same thread, and
+		# a graph cannot have nodes removed from it, so building on it would leak every node of
+		# every model for the lifetime of the thread. Owning the graph means the model's nodes
+		# become collectable as soon as the instance is dropped.
+		self.graph = tf.Graph()
+		with self.graph.as_default():
+			self._build(**build_args)
+
+
+	def _build(self,
+				 readcounts,
+				 guide_gene_map,
+				 sequence_map,
+				 negative_control_sgrnas={},
+
+				 gene_effect_hierarchical=.1,
+				 gene_effect_smoothing=1.5,
+				 kernel_width=50,
+				 gene_effect_L1=0.1,
+				 gene_effect_L2=0,
+				 offset_reg=1,
+				 excess_variance=None,
+				 guide_efficacy_reg=.01,
+				 library_batch_reg=.1,
+
+				 growth_rate_reg=0.01,
+				 smart_init=True,
+				 pretrained=False,
+				 constrained_mean=False,
+				 replicate_efficacy_guide_quantile=0.02,
+				 initial_screen_delay=3,
+				 scale_cost=0.67,
+				 max_learning_rate=.04,
+				 dtype=tf.double,
+				 verify_integrity=True,
+				 log_dir=None,
+				 to_normalize_readcounts=True,
+				 use_line_mean_as_reference=5,
+				 print_to="stdout"
+				):
+		'''
+		Construct the model. Takes the same arguments as `Chronos.__init__`, which is the public
+		entry point; see its docstring. Must only be called with `self.graph` as the default graph,
+		which `__init__` guarantees.
+		'''
 
 		###########################    I N I T I A L      C  H  E  C  K  S  ############################
 		self.printer = StdoutRedirector(print_to)
@@ -1127,7 +1177,6 @@ class Chronos(object):
 			# why TF's persistence requires two handles, I don't know. But it does.
 			tensor_handle, data = tf.compat.v1.get_session_tensor(state_handle.handle, dtype=dtype, name="handle")
 			self.run_dict[tensor_handle] = state_handle.handle
-			self.persistent_handles.add(state_handle.handle)
 		return data
 
 
@@ -1467,7 +1516,6 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 			self._gene_effect_hierarchical: self._private_gene_effect_hierarchical
 		}
 		self.max_learning_rate = max_learning_rate
-		self.persistent_handles = set([])
 
 
 	def _get_gene_effect_mask(self, readcounts, sequence_map, guide_gene_map, dtype):
@@ -2712,8 +2760,12 @@ your data" % (sorted(library_effect.columns), missing)
 
 
 	def __del__(self):
-		for handle in self.persistent_handles:
-			tf.compat.v1.delete_session_tensor(handle)
+		# The summary writer owns a background thread and an open event file. 
+		try:
+			if getattr(self, "writer", None) is not None:
+				self.writer.close()
+		except Exception:
+			pass
 		try:
 			self.sess.close()
 		except AttributeError:
