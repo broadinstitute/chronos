@@ -33,7 +33,7 @@ class StdoutRedirector():
 			print(*string)
 		elif isinstance(self.output, str):
 			with open(self.output, "a") as f:
-				f.write('\t'.join(string) + "\n")
+				f.write('\t'.join([str(s) for s in string]) + "\n")
 		elif self.output is None:
 			pass
 		else:

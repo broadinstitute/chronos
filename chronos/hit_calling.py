@@ -571,7 +571,7 @@ class ConditionComparison():
 	def __init__(self, readcounts, condition_map, guide_gene_map,
 		negative_control_genes=None, negative_control_sgrnas=None,
 		keep_models=False, 
-		intermediate_print_to='stdout', print_to='None', **kwargs):
+		intermediate_print_to='stdout', print_to=None, **kwargs):
 		'''
 		Initialize the comparator.
 		Parameters:
@@ -593,6 +593,7 @@ class ConditionComparison():
 			`keep_models` (`bool`): if true, Chronos models trained in `.compare_conditions` will be retained.
 			Additional keyword arguments will be passed to `model.Chronos` when training the models.
 		'''
+		self.printer = StdoutRedirector(intermediate_print_to)
 		check_condition_map(condition_map)
 		check_inputs(readcounts, guide_gene_map, condition_map)
 
@@ -617,7 +618,7 @@ class ConditionComparison():
 		self.negative_control_genes = negative_control_genes
 		self.negative_control_sgrnas = negative_control_sgrnas
 
-		print("checking for high negative control correlation between replicates in the same condition")
+		self.printer.print("checking for high negative control correlation between replicates in the same condition")
 		self.excess_correlation_warning = check_for_excess_correlation(readcounts, condition_map, negative_control_sgrnas)
 		if negative_control_genes is None:
 			negative_control_genes = []
@@ -739,19 +740,19 @@ every map.")
 			self.retained_readcounts, self.condition_map, self.guide_gene_map
 		)
 
-		print("training model without conditions distinguished")
+		self.printer.print("training model without conditions distinguished")
 		self.undistinguished_likelihood = self.get_undistinguished_results(
 			self.undistinguished_map, nepochs, **kwargs
 		)
 
-		print("training model with conditions distinguished")
+		self.printer.print("training model with conditions distinguished")
 		self.distinguished_map, self.distinguished_likelihood, \
 			distinguished_gene_effect = self.get_distinguished_results(
 			self.undistinguished_map, condition_pair, nepochs, 
 			 **kwargs
 		)
 
-		print("training models with permuted conditions")
+		self.printer.print("training models with permuted conditions")
 		self.permuted_maps, self.permuted_likelihoods, \
 			permuted_gene_effects = self.get_permuted_results(
 			max_null_iterations, self.undistinguished_map, condition_pair, 
@@ -780,7 +781,7 @@ every map.")
 		}, inplace=True)
 
 
-		print("calculating empirical significance")
+		self.printer.print("calculating empirical significance")
 		significance = self.get_significance(
 			gene_readcount_total_bin_quantiles,
 			self.readcount_gene_totals,
