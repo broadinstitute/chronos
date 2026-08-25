@@ -1074,9 +1074,8 @@ class Chronos(object):
 		# this is normalized to have sum 1, then multiplied by _pdna_scale to get the absolute expected reads.
 		self._predicted_readcounts_unscaled, self._predicted_readcounts = self._get_abundance_estimates(self._t0, self._change)
 
-		init_op = tf.compat.v1.global_variables_initializer()
 		self.printer.print('initializing precost variables')
-		self.sess.run(init_op)
+		self._initialize_variables()
 
 		#####################################    C  O  S  T    #########################################
 
@@ -1134,9 +1133,8 @@ class Chronos(object):
 			self.log_dir = log_dir
 			self.writer = tf.compat.v1.summary.FileWriter(log_dir, self.sess.graph)
 		
-		init_op = tf.compat.v1.global_variables_initializer()
 		self.printer.print('initializing rest of graph')
-		self.sess.run(init_op)
+		self._initialize_variables()
 
 		if scale_cost:
 			denom = self.cost
@@ -1164,6 +1162,16 @@ class Chronos(object):
 	##############   I N I T I A L I Z A T I O N    M  E  T  H  O  D  S    #########################
 	################################################################################################
 
+	def _initialize_variables(self):
+		# initialize uninitialized variables
+		new_variables = [
+			v for v in tf.compat.v1.global_variables()
+            if v.name not in self._initialized_variable_names
+		]
+		if not new_variables:
+			return
+		self.sess.run([v.initializer for v in new_variables])
+		self._initialized_variable_names.update(v.name for v in new_variables)
 
 	def get_persistent_input(self, dtype, data, name=''):
 		with tf.compat.v1.name_scope(name):
@@ -1510,6 +1518,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 	def _initialize_graph(self, max_learning_rate, dtype):
 		self.printer.print('initializing graph')
 		self.sess = tf.compat.v1.Session()
+		self._initialized_variable_names = set()
 		self._learning_rate = tf.compat.v1.placeholder(shape=tuple(), dtype=dtype)
 		self.run_dict = {
 			self._learning_rate: max_learning_rate, 
