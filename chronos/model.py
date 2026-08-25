@@ -27,15 +27,17 @@ class StdoutRedirector():
 				f.write("beginning log: %s\n" % current_time)
 
 	def print(self, *string):
-		if self.output == "stdout":
+		if callable(self.output):
+			self.output(*string)
+		elif self.output == "stdout":
 			print(*string)
 		elif isinstance(self.output, str):
 			with open(self.output, "a") as f:
-				f.write('\t'.join(string) + "\n")
+				f.write('\t'.join([str(s) for s in string]) + "\n")
 		elif self.output is None:
 			pass
 		else:
-			raise ValueError("`output` for printing must be 'stdout', a file path, \
+			raise ValueError("`output` for printing must be callable, 'stdout', a file path, \
 or `None`")
 
 
