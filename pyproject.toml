@@ -1,0 +1,37 @@
+[project]
+name = "chronos"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "yunyejie",email = "yunyejie@broadinstitute.org"}
+]
+readme = "README.md"
+requires-python = ">=3.10,<4"
+dependencies = [
+    "patsy (>=0.5.2)",
+    "matplotlib (>=3.6)",
+    "seaborn (>=0.12)",
+    "scikit-learn (>=1.1)",
+    "statsmodels (>=0.13)",
+    "scipy (>=1.9)",
+    "adjusttext (>=1.3.0,<2.0.0)",
+    "umap-learn (>=0.5.3)",
+    "reportlab (>=3.6)",
+    "numpy (>=1.2)",
+    "pandas (>=1.3)",
+    "tensorflow (>2)",
+    "h5py (>=3.7)",
+    "sympy (>=1.0)",
+    "setuptools (>=82.0.1,<83.0.0)",
+    "distribute (>=0.7.3,<0.8.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "ipykernel (>=7.2.0,<8.0.0)"
+]
