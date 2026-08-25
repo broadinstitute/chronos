@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crispr_chronos"
-version = "2.3.11"
+version = "2.3.14"
 authors = [
   { name="Joshua Dempster", email="cds@broadinstitute.org" },
 ]
