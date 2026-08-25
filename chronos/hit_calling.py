@@ -938,7 +938,7 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 		counts = 0
 		self.permuted_models = []
 		for i, permuted_map in enumerate(permuted_maps):
-			print('\trandom iteration %i' %i)
+			self.printer.print('\trandom iteration %i' %i)
 				
 			permuted_model = Chronos(readcounts=self.retained_readcounts, 
 								 sequence_map=permuted_map,
