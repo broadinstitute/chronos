@@ -1776,7 +1776,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 
 				gene_presence_indicator = {
 					key: (
-							self.numpy_ge_masks[key].mean()[self.all_genes] > .5
+							self.numpy_ge_masks[key].mean()[self.all_genes] > 0
 						).values.reshape((1, -1)).astype(self.np_dtype)
 					for key in self.keys
 				}
