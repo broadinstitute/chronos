@@ -1832,7 +1832,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 				if self._pretrained:
 					_library_effect = v_library_effect
 				else:
-					_library_effect = {key: v - _library_effect_mean 
+					_library_effect = {key: _gene_presence_indicated[key] * (v - _library_effect_mean) 
 					for key, v in _library_effect_indicated.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
