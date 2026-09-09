@@ -1835,7 +1835,7 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 
 				gene_presence_indicator = {
 					key: (
-							self.numpy_ge_masks[key].mean()[self.all_genes] > .5
+							self.numpy_ge_masks[key].mean()[self.all_genes] > 0
 						).values.reshape((1, -1)).astype(self.np_dtype)
 					for key in self.keys
 				}
@@ -1879,7 +1879,10 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 					 dtype=dtype, name="library_data_size_summed"
 				)
 
-				#_library_effect_indicated = {key: v * _gene_presence_indicated[key] for key, v in v_library_effect.items()}
+				_library_effect_indicated = {
+					key: v * _gene_presence_indicated[key] 
+					for key, v in v_library_effect.items()
+				}
 				_library_effect_mean = tf.add_n([
 					   _library_data_size[key] * v_library_effect[key] 
 					for key in self.keys
@@ -1888,7 +1891,8 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 				if self._pretrained:
 					_library_effect = v_library_effect
 				else:
-					_library_effect = {key: v - _library_effect_mean for key, v in v_library_effect.items()}
+					_library_effect = {key: _gene_presence_indicated[key] * (v - _library_effect_mean) 
+					for key, v in _library_effect_indicated.items()}
 
 			tf.compat.v1.summary.histogram("mean_gene_effect", v_mean_effect)
 
@@ -2065,18 +2069,45 @@ guide abundance"
 				name="library_mask_sum_%s" % key
 			) for key, val in numpy_ge_masks.items()}
 
+			_library_mask_sums_inverse = {key: tf.constant(
+				(1-val).astype(self.np_dtype).sum().clip(1, 1e6).values.reshape((1,-1)), 
+				dtype, 
+				name="library_mask_sum_inverse_%s" % key
+			) for key, val in numpy_ge_masks.items()}
+
 			_indicator_product = {key: tf.multiply(
 				val, _gene_effect, name="library_mask_product_%s" % key
 			) for key, val in _library_masks.items()}
 
-			_library_means = {key: tf.reduce_sum(
+			_indicator_product_inverse = {key: tf.multiply(
+				(1-val), _gene_effect, name="library_mask_product_%s" % key
+			) for key, val in _library_masks.items()}
+
+			_library_means = {key: 
+				tf.reduce_sum(
 					val, axis=0, name="library_effect_sum"
-				)[tf.newaxis, :] / _library_mask_sums[key]
+				)[tf.newaxis, :] 
+				/ _library_mask_sums[key]
 				for key, val in _indicator_product.items()
 			}
 
+			_library_means_inverse = {key: 
+				tf.reduce_sum(
+					val, axis=0, name="library_effect_sum"
+				)[tf.newaxis, :] 
+				/ _library_mask_sums_inverse[key]
+				for key, val in _indicator_product_inverse.items()
+			}
+
+			_library_weights = {key:
+				tf.math.minimum(
+					_library_mask_sums[key], _library_mask_sums_inverse[key]
+				) / (.5 * (_library_mask_sums[key] + _library_mask_sums_inverse[key]))
+				for key in self.keys
+			}
+
 			_library_reg = tf.add_n([
-				library_reg * tf.reduce_mean(_library_means[key]**2, name="squared_means")
+				library_reg * tf.reduce_mean(_library_weights[key] * _library_means[key]**2, name="squared_means")
 				for key in self.keys
 			], name="library_reg")
 
