@@ -27,15 +27,17 @@ class StdoutRedirector():
 				f.write("beginning log: %s\n" % current_time)
 
 	def print(self, *string):
-		if self.output == "stdout":
+		if callable(self.output):
+			self.output(*string)
+		elif self.output == "stdout":
 			print(*string)
 		elif isinstance(self.output, str):
 			with open(self.output, "a") as f:
-				f.write('\t'.join(string) + "\n")
+				f.write('\t'.join([str(s) for s in string]) + "\n")
 		elif self.output is None:
 			pass
 		else:
-			raise ValueError("`output` for printing must be 'stdout', a file path, \
+			raise ValueError("`output` for printing must be callable, 'stdout', a file path, \
 or `None`")
 
 
@@ -706,8 +708,8 @@ class Chronos(object):
 	default_timepoint_scale = .1 * np.log(2)
 	default_cost_value = 0.67
 	variable_max_value = 5
-	persistent_handles = set([])
-	def __init__(self, 
+
+	def __init__(self,
 				 readcounts,
 				 guide_gene_map,
 				 sequence_map,
@@ -808,8 +810,8 @@ class Chronos(object):
 								Chronos will normalize such that the median log reads of negative controls in each replicate match
 								the median in the pDNA batch. 
 			use_line_mean_as_reference (`int`): passed to `estimate_alpha`
-			print_to (`str` or `None`): where to print ordinary messages from Chronos. Default is `stdout`. Pass a file path to print
-								to the file or `None` to skip these messages.
+			print_to (`str` or callable or `None`): where to print ordinary messages from Chronos. Default is `stdout`. 
+					Pass a file path to write to the file or `None` to skip these messages.
 
 		Attributes:
 			Attributes beginning wit "v_" are tensorflow variables, and attributes beginning with _ are 
@@ -841,7 +843,57 @@ class Chronos(object):
 			t0_core
 			t0_offset
 		'''
+		# Capture the constructor arguments before binding any other local. `locals()` here is
+		# exactly the parameter list above, so the forwarding call below cannot drift out of sync
+		# with the signature.
+		build_args = {key: val for key, val in locals().items() if key != "self"}
 
+		# Every tensorflow node Chronos creates must live in a graph owned by this instance.
+		# Tensorflow's implicit default graph is shared by everything built in the same thread, and
+		# a graph cannot have nodes removed from it, so building on it would leak every node of
+		# every model for the lifetime of the thread. Owning the graph means the model's nodes
+		# become collectable as soon as the instance is dropped.
+		self.graph = tf.Graph()
+		with self.graph.as_default():
+			self._build(**build_args)
+
+
+	def _build(self,
+				 readcounts,
+				 guide_gene_map,
+				 sequence_map,
+				 negative_control_sgrnas={},
+
+				 gene_effect_hierarchical=.1,
+				 gene_effect_smoothing=1.5,
+				 kernel_width=50,
+				 gene_effect_L1=0.1,
+				 gene_effect_L2=0,
+				 offset_reg=1,
+				 excess_variance=None,
+				 guide_efficacy_reg=.01,
+				 library_batch_reg=.1,
+
+				 growth_rate_reg=0.01,
+				 smart_init=True,
+				 pretrained=False,
+				 constrained_mean=False,
+				 replicate_efficacy_guide_quantile=0.02,
+				 initial_screen_delay=3,
+				 scale_cost=0.67,
+				 max_learning_rate=.04,
+				 dtype=tf.double,
+				 verify_integrity=True,
+				 log_dir=None,
+				 to_normalize_readcounts=True,
+				 use_line_mean_as_reference=5,
+				 print_to="stdout"
+				):
+		'''
+		Construct the model. Takes the same arguments as `Chronos.__init__`, which is the public
+		entry point; see its docstring. Must only be called with `self.graph` as the default graph,
+		which `__init__` guarantees.
+		'''
 
 		###########################    I N I T I A L      C  H  E  C  K  S  ############################
 		self.printer = StdoutRedirector(print_to)
@@ -1022,9 +1074,8 @@ class Chronos(object):
 		# this is normalized to have sum 1, then multiplied by _pdna_scale to get the absolute expected reads.
 		self._predicted_readcounts_unscaled, self._predicted_readcounts = self._get_abundance_estimates(self._t0, self._change)
 
-		init_op = tf.compat.v1.global_variables_initializer()
 		self.printer.print('initializing precost variables')
-		self.sess.run(init_op)
+		self._initialize_variables()
 
 		#####################################    C  O  S  T    #########################################
 
@@ -1082,9 +1133,8 @@ class Chronos(object):
 			self.log_dir = log_dir
 			self.writer = tf.compat.v1.summary.FileWriter(log_dir, self.sess.graph)
 		
-		init_op = tf.compat.v1.global_variables_initializer()
 		self.printer.print('initializing rest of graph')
-		self.sess.run(init_op)
+		self._initialize_variables()
 
 		if scale_cost:
 			denom = self.cost
@@ -1112,6 +1162,16 @@ class Chronos(object):
 	##############   I N I T I A L I Z A T I O N    M  E  T  H  O  D  S    #########################
 	################################################################################################
 
+	def _initialize_variables(self):
+		# initialize uninitialized variables
+		new_variables = [
+			v for v in tf.compat.v1.global_variables()
+            if v.name not in self._initialized_variable_names
+		]
+		if not new_variables:
+			return
+		self.sess.run([v.initializer for v in new_variables])
+		self._initialized_variable_names.update(v.name for v in new_variables)
 
 	def get_persistent_input(self, dtype, data, name=''):
 		with tf.compat.v1.name_scope(name):
@@ -1125,7 +1185,6 @@ class Chronos(object):
 			# why TF's persistence requires two handles, I don't know. But it does.
 			tensor_handle, data = tf.compat.v1.get_session_tensor(state_handle.handle, dtype=dtype, name="handle")
 			self.run_dict[tensor_handle] = state_handle.handle
-			self.persistent_handles.add(state_handle.handle)
 		return data
 
 
@@ -1459,13 +1518,13 @@ or there is a bug in Chronos. Please report at https://github.com/broadinstitute
 	def _initialize_graph(self, max_learning_rate, dtype):
 		self.printer.print('initializing graph')
 		self.sess = tf.compat.v1.Session()
+		self._initialized_variable_names = set()
 		self._learning_rate = tf.compat.v1.placeholder(shape=tuple(), dtype=dtype)
 		self.run_dict = {
 			self._learning_rate: max_learning_rate, 
 			self._gene_effect_hierarchical: self._private_gene_effect_hierarchical
 		}
 		self.max_learning_rate = max_learning_rate
-		self.persistent_handles = set([])
 
 
 	def _get_gene_effect_mask(self, readcounts, sequence_map, guide_gene_map, dtype):
@@ -2741,8 +2800,12 @@ your data" % (sorted(library_effect.columns), missing)
 
 
 	def __del__(self):
-		for handle in self.persistent_handles:
-			tf.compat.v1.delete_session_tensor(handle)
+		# The summary writer owns a background thread and an open event file. 
+		try:
+			if getattr(self, "writer", None) is not None:
+				self.writer.close()
+		except Exception:
+			pass
 		try:
 			self.sess.close()
 		except AttributeError:

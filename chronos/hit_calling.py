@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from statsmodels.stats.multitest import fdrcorrection, multipletests
 import statsmodels.api as sm
-from .model import Chronos, check_inputs, calculate_fold_change, normalize_readcounts
+from .model import Chronos, check_inputs, calculate_fold_change, normalize_readcounts, StdoutRedirector
 from .reports import sum_collapse_dataframes
 from .evaluations import fast_cor
 from warnings import warn
@@ -13,6 +13,8 @@ from scipy.signal import argrelextrema
 from sklearn.linear_model import LinearRegression
 from sympy.utilities.iterables import multiset_permutations
 from shutil import rmtree
+from tempfile import mkdtemp
+import os
 try:
 	from tqdm import tqdm
 except ImportError:
@@ -571,7 +573,7 @@ class ConditionComparison():
 	def __init__(self, readcounts, condition_map, guide_gene_map,
 		negative_control_genes=None, negative_control_sgrnas=None,
 		keep_models=False, 
-		print_to=None, **kwargs):
+		intermediate_print_to='stdout', print_to=None, **kwargs):
 		'''
 		Initialize the comparator.
 		Parameters:
@@ -591,8 +593,13 @@ class ConditionComparison():
 			`negative_control_sgrnas` (`None` or `dict` of iterable): Needed if `negative_control_genes` not included. A per-library
 					list of targeting sgRNAs not expected to produce a viability phenotype. See `model.Chronos`.
 			`keep_models` (`bool`): if true, Chronos models trained in `.compare_conditions` will be retained.
+			`intermediate_print_to` (`str` or callable or `None`): where to print ordinary messages from the Comparator. Default is `stdout`. 
+					Pass a file path to write to the file or `None` to skip these messages.
+			`print_to` (`str` or callable or `None`): where to print ordinary messages from child Chronos models. Default is `stdout`. 
+					Pass a file path to write to the file or `None` to skip these messages.
 			Additional keyword arguments will be passed to `model.Chronos` when training the models.
 		'''
+		self.printer = StdoutRedirector(intermediate_print_to)
 		check_condition_map(condition_map)
 		check_inputs(readcounts, guide_gene_map, condition_map)
 
@@ -617,7 +624,7 @@ class ConditionComparison():
 		self.negative_control_genes = negative_control_genes
 		self.negative_control_sgrnas = negative_control_sgrnas
 
-		print("checking for high negative control correlation between replicates in the same condition")
+		self.printer.print("checking for high negative control correlation between replicates in the same condition")
 		self.excess_correlation_warning = check_for_excess_correlation(readcounts, condition_map, negative_control_sgrnas)
 		if negative_control_genes is None:
 			negative_control_genes = []
@@ -635,6 +642,24 @@ genes must be passed to check p-value calibration after compare_conditions is ru
 		self.keep_models = keep_models
 		self.kwargs = kwargs
 		self.keys = sorted(self.readcounts.keys())
+		self._scratch_dir = None
+
+
+	def _get_scratch_dir(self):
+		'''
+		Directory used to hand the trained undistinguished model over to the distinguished and
+		permuted models. Needed for safety with concurrent runs in the same directory.
+		'''
+		if self._scratch_dir is None:
+			self._scratch_dir = mkdtemp(prefix="chronos_compare_")
+		return self._scratch_dir
+
+
+	def _clear_scratch_dir(self):
+		if self._scratch_dir is not None:
+			rmtree(self._scratch_dir, ignore_errors=True)
+			self._scratch_dir = None
+
 
 	def _check_condition_pair(self,  condition_pair):
 		if condition_pair is None:
@@ -739,25 +764,28 @@ every map.")
 			self.retained_readcounts, self.condition_map, self.guide_gene_map
 		)
 
-		print("training model without conditions distinguished")
-		self.undistinguished_likelihood = self.get_undistinguished_results(
-			self.undistinguished_map, nepochs, **kwargs
-		)
+		try:
+			self.printer.print("training model without conditions distinguished")
+			self.undistinguished_likelihood = self.get_undistinguished_results(
+				self.undistinguished_map, nepochs, **kwargs
+			)
 
-		print("training model with conditions distinguished")
-		self.distinguished_map, self.distinguished_likelihood, \
-			distinguished_gene_effect = self.get_distinguished_results(
-			self.undistinguished_map, condition_pair, nepochs, 
-			 **kwargs
-		)
+			self.printer.print("training model with conditions distinguished")
+			self.distinguished_map, self.distinguished_likelihood, \
+				distinguished_gene_effect = self.get_distinguished_results(
+				self.undistinguished_map, condition_pair, nepochs,
+				 **kwargs
+			)
 
-		print("training models with permuted conditions")
-		self.permuted_maps, self.permuted_likelihoods, \
-			permuted_gene_effects = self.get_permuted_results(
-			max_null_iterations, self.undistinguished_map, condition_pair, 
-			allow_reversed_permutations, nepochs, 
-			**kwargs
-		)
+			self.printer.print("training models with permuted conditions")
+			self.permuted_maps, self.permuted_likelihoods, \
+				permuted_gene_effects = self.get_permuted_results(
+				max_null_iterations, self.undistinguished_map, condition_pair,
+				allow_reversed_permutations, nepochs,
+				**kwargs
+			)
+		finally:
+			self._clear_scratch_dir()
 
 		gene_effect_in_alt, gene_effect_in_baseline, gene_effect_difference = self.get_gene_effect_difference(
 			distinguished_gene_effect, condition_pair
@@ -780,7 +808,7 @@ every map.")
 		}, inplace=True)
 
 
-		print("calculating empirical significance")
+		self.printer.print("calculating empirical significance")
 		significance = self.get_significance(
 			gene_readcount_total_bin_quantiles,
 			self.readcount_gene_totals,
@@ -873,7 +901,7 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 			**self.kwargs
 		)
 		undistinguished_model.train(nepochs, **kwargs)
-		undistinguished_model.save(".chronos_compare_undistinguished_model", overwrite=True)
+		undistinguished_model.save(self._get_scratch_dir(), overwrite=True)
 		likelihood = cell_line_log_likelihood(undistinguished_model, undistinguished_map)
 		if self.keep_models:
 			self.undistinguished_model = undistinguished_model
@@ -902,8 +930,8 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 			 print_to=self.print_to,
 			**self.kwargs
 		)
-		distinguished_model.import_model(".chronos_compare_undistinguished_model")
-		growth_rate = pd.read_csv(".chronos_compare_undistinguished_model/growth_rate.csv")
+		distinguished_model.import_model(self._get_scratch_dir())
+		growth_rate = pd.read_csv(os.path.join(self._get_scratch_dir(), "growth_rate.csv"))
 
 		growth_rate = _remap_growth_rates(growth_rate, undistinguished_map,
 			distinguished_map)
@@ -937,7 +965,7 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 		counts = 0
 		self.permuted_models = []
 		for i, permuted_map in enumerate(permuted_maps):
-			print('\trandom iteration %i' %i)
+			self.printer.print('\trandom iteration %i' %i)
 				
 			permuted_model = Chronos(readcounts=self.retained_readcounts, 
 								 sequence_map=permuted_map,
@@ -949,9 +977,9 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 								  print_to=self.print_to,
 								**self.kwargs
 								)
-			permuted_model.import_model(".chronos_compare_undistinguished_model")
+			permuted_model.import_model(self._get_scratch_dir())
 
-			growth_rate = pd.read_csv(".chronos_compare_undistinguished_model/growth_rate.csv")
+			growth_rate = pd.read_csv(os.path.join(self._get_scratch_dir(), "growth_rate.csv"))
 			permuted_model.growth_rate = _remap_growth_rates(growth_rate, undistinguished_map,
 				permuted_map)
 
@@ -970,7 +998,6 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 
 		if not self.keep_models:
 			del self.permuted_models
-		rmtree(".chronos_compare_undistinguished_model")
 		return permuted_maps, out, permuted_gene_effects
 
 
