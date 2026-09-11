@@ -41,22 +41,37 @@ def get_optimizer_noise_cutoff(log_likelihoods, fraction=.2):
 	'''
 	log_likelihoods = np.sort(log_likelihoods)
 	n_neg = (log_likelihoods < 0).sum()
-	insertions = np.searchsorted(log_likelihoods, -log_likelihoods)
-	num_more_extreme = len(log_likelihoods) - insertions
-	num_negatives_included = np.arange(1, len(log_likelihoods)+1)
-	num_negatives_included[n_neg:] = n_neg
-	ratio = num_negatives_included / (num_negatives_included + num_more_extreme)
-	index = np.arange(len(log_likelihoods))
+
+	#find the number of negative log likelihoods 
+	#more extreme than the ith-least-positive log likelihood
+	num_negatives_included = np.searchsorted(
+	log_likelihoods[log_likelihoods < 0], 
+		-log_likelihoods[::-1]
+	)
+
+	num_positives_included = np.arange(1, len(log_likelihoods)+1)
+	ratio = num_negatives_included / (num_negatives_included + num_positives_included)
+	index = np.arange(len(log_likelihoods)).astype(int)[::-1]
 	try:
-		u0_ind = index[ratio < fraction][-1]
+		unmirrored_ind = np.arange(len(log_likelihoods))[ratio > fraction][0] - 1
+		u0_ind = index[ratio > fraction][0] + 1
 	except IndexError as e:
-		return None
-	u0 = -log_likelihoods[u0_ind]
+		if n_neg/len(log_likelihoods) < fraction and ratio[0] < fraction:
+			return 0
+		else:
+			return None
+
+	u0 = log_likelihoods[u0_ind]
 	if np.sum(log_likelihoods < -u0) / (np.sum(log_likelihoods < -u0) + np.sum(log_likelihoods > u0)) > fraction:
+		print(u0, 
+			num_negatives_included[u0_ind], np.sum(log_likelihoods < -u0),
+			num_positives_included[u0_ind], np.sum(log_likelihoods > u0),
+			ratio[u0_ind])
 		raise RuntimeError("bug encountered that caused invalid u0 value")
 	if u0 < 0:
 		u0 = 0
 	return u0
+
 
 def genpareto_params(log_likelihoods, u0, clamp_xi=True):
 	'''
@@ -81,6 +96,7 @@ def genpareto_params(log_likelihoods, u0, clamp_xi=True):
 			warn(f"found negative generalized Pareto shape parameter xi={xi}, clipping to 0")
 			xi = 0
 	return p_u0, xi, sigma
+
 
 def genpareto_certify(log_likelihoods, p_u0, xi, sigma, u0, alpha, delta=2.0, conf=0.95):
 	'''
@@ -140,6 +156,7 @@ def genpareto_certify(log_likelihoods, p_u0, xi, sigma, u0, alpha, delta=2.0, co
 		min_certifiable_delta = None
 	return certification, min_certifiable_delta
 
+
 def genpareto_p(log_likelihoods, p_u0, xi, sigma, u0):
 	'''
 	Estimate the p-values for the log_likelihoods > u0, using
@@ -171,6 +188,7 @@ def genpareto_p(log_likelihoods, p_u0, xi, sigma, u0):
 		raise ValueError(f"{(p < 0).sum()} negative generalized Pareto p-values found")
 	return p
 
+
 def get_u0(log_likelihoods, noise_fraction=.2, min_samples_retain=300, lowest_quantile=.8,
 		  violation="warn"):
 	'''
@@ -198,16 +216,28 @@ def get_u0(log_likelihoods, noise_fraction=.2, min_samples_retain=300, lowest_qu
 		u0_max = np.quantile(log_likelihoods, 1-min_samples_retain/len(log_likelihoods))
 	except ValueError:
 		raise ValueError("min_samples_retain > the number of log_likelihoods")
+
 	if u0_min > u0_max:
+		message = (
+			"not enough data to meet all conditions on the boundary u0 for fitting Pareto. "
+			f"Minimum bound for controlling optimizer noise below "
+			f"{noise_fraction}: {optimizer_bound}. "
+			f"Minimum bound to exclude the lowest {lowest_quantile} value: "
+			f"{np.quantile(log_likelihoods, lowest_quantile)}. "
+			f"Maximum value to include at least {min_samples_retain} points for fitting: "
+			f"{u0_max}"
+		)
+
 		if violation == "warn":
-			warn("not enough data to meet all conditions on the boundary u0 for fitting Pareto")
+			warn(message)
 		elif violation == "error":
-			raise RuntimeError("not enough data to meet all conditions on the boundary u0 for fitting Pareto")
+			raise RuntimeError(message)
 		elif violation == "ignore":
 			pass
 		else:
 			raise ValueError("`violation` must be one of 'warn', 'error', 'ignore'")
 	return min(u0_min, u0_max)
+
 
 def genpareto_heldout_certification(permuted_lls, test_frac=.5, noise_fraction=.2, delta=2.0, conf=.95, 
 									alpha_rank=50, min_samples_retain=300, lowest_quantile=.8, 
@@ -244,9 +274,14 @@ def genpareto_heldout_certification(permuted_lls, test_frac=.5, noise_fraction=.
 	perm = rng.permutation(len(permuted_lls))
 	train, test = permuted_lls[perm[:cutoff]], permuted_lls[perm[cutoff:]]
 	if len(train) < 1000:
-		warn(f"only {len(train)} samples in the training set for certifying the generalized Pareto distribution.")
+		warn(
+			f"only {len(train)} samples in the training set for certifying "
+			"the generalized Pareto distribution."
+		)
 	try:
-		u0 = get_u0(train, noise_fraction, min_samples_retain, lowest_quantile, violation="error")
+		u0 = get_u0(
+			train, noise_fraction, min_samples_retain, lowest_quantile, violation="error"
+		)
 	except RuntimeError:
 		return "rejected", None, None
 	if u0 is None:
@@ -259,7 +294,6 @@ def genpareto_heldout_certification(permuted_lls, test_frac=.5, noise_fraction=.
 	certification, min_delta = genpareto_certify(test, p_u0, xi, sigma, u0, alpha, delta, conf)
 	return certification, alpha, min_delta
 
-from chronos.hit_calling import empirical_pvalue
 
 def loglikelihood_p(observed_lls, permuted_lls, noise_fraction=.2, test_frac=.5, 
 					delta=2, conf=.95, alpha_rank=50, accept_underpowered=True, accept_indeterminate=True,
@@ -313,33 +347,38 @@ def loglikelihood_p(observed_lls, permuted_lls, noise_fraction=.2, test_frac=.5,
 			`u0` (`float` > 0): the threshold on observed_lls. Likelihoods above this threshold were assigned p-values
 				by the Pareto model, unless `certification` is "rejected".
 			`disagreement` (`float`): the RMSE of log(Pareto estimated p) - log(empirical p)
+			`bias` (`float`): the mean ratio of Pareto estimated to empirical p in up to the last 50 values: 
+				exp(mean(log(Pareto estimated p) - log(empirical p)))
 	'''
 	p_emp = empirical_pvalue(observed_lls, permuted_lls, direction=1)
 	if (p_emp < 0).any():
 		raise ValueError("negative empirical p-values")
 	if len(permuted_lls) < min_samples_for_genpareto:
 		warn(
-			"Too few total values in the permuted log likelihood changes to estimate a null distribution"
+			"Too few total values in the permuted log likelihood changes to estimate "
+			"a null distribution. "
 			"Only empirical p-values will be returned."
 		)
-		return p_emp, "rejected", None, None, None, None
+		return p_emp, "rejected", None, None, None, None, None
 
 	try:
 		u0 = get_u0(permuted_lls, noise_fraction, min_samples_for_genpareto, lowest_quantile, violation="error")
-	except RuntimeError:
-		warn("not enough permuted data to find a good tail for generalized Pareto."
+	except RuntimeError as e:
+		warn("not enough permuted data to find a good tail for generalized Pareto. "
 			 "Only empirical p-values will be returned."
 			)
-		return p_emp, "rejected", None, None, None, None
+		return p_emp, "rejected", None, None, None, None, None
 	n_samples = (permuted_lls > u0).sum()
 	if n_samples <  min_samples_for_genpareto:
 		warn(
 			"Too much of the permuted likelihoods is explained by pure optimization noise "
-			"(indicated by the large number of negative changes in likelihood extending into the tail). "
-			f"After excluding the bulk explained by optimization noise, {n_samples} points remain. "
+			"(indicated by the large number of negative changes in likelihood extending into "
+			"the tail). "
+			f"After excluding the bulk explained by optimization noise, {n_samples} "
+			"points remain. "
 			"Only empirical p-values will be returned."
 		)
-		return p_emp, "rejected", None, None, None, None
+		return p_emp, "rejected", None, None, None, None, None
 
 	certification, alpha, min_delta = genpareto_heldout_certification(
 		permuted_lls, test_frac, noise_fraction, delta, conf, alpha_rank, min_samples_for_genpareto,
@@ -347,44 +386,53 @@ def loglikelihood_p(observed_lls, permuted_lls, noise_fraction=.2, test_frac=.5,
 	)
 	if certification == "rejected":
 		warn(
-			f'the generalized Pareto p estimates were not certified ("{certification}").'
-			f'Only empirical p-values will be returned.'
-			f'You can reduce `conf` from {conf} to tolerate a higher rate of false certification'
-			f'or increase `delta` from {delta} to at least {min_delta} to tolerate greater error in certified p-values'
+			f'the generalized Pareto p estimates were not certified ("{certification}"). '
+			f'Only empirical p-values will be returned. '
+			f'You can reduce `conf` from {conf} to tolerate a higher rate of false certification '
+			f'or increase `delta` from {delta} to at least {min_delta} '
+			f'to tolerate greater error in certified p-values.'
 		)
-		return p_emp, certification, alpha, min_delta, u0
+		return p_emp, certification, alpha, min_delta, u0, None, None
+
 	if certification == "indeterminate" and not accept_indeterminate:
 		warn(
-			f'the generalized Pareto p estimates could not be certified, possibly due to insufficient data'
-			f'Only empirical p-values will be returned. Pass `accept_indeterminate=True (recommended)'
-			f'to use the generalized Pareto model anyway'
-			f'You can reduce `conf` from {conf} to tolerate a higher rate of false certification'
-			f'or increase `delta` from {delta} to at least {min_delta} to tolerate greater error in certified p-values'
+			f'the generalized Pareto p estimates could not be certified, '
+			f'possibly due to insufficient data. '
+			f'Only empirical p-values will be returned. '
+			f'Pass `accept_indeterminate=True (recommended) '
+			f'to use the generalized Pareto model anyway '
+			f'You can reduce `conf` from {conf} to tolerate a higher rate of false certification '
+			f'or increase `delta` from {delta} to at least {min_delta} '
+			f'to tolerate greater error in certified p-values.'
 		)
-		return p_emp, certification, alpha, min_delta, u0
+		return p_emp, certification, alpha, min_delta, u0, None, None
 	if certification == "underpowered" and not accept_underpowered:
 		warn(
-			f'the generalized Pareto p estimates could not be certified due to insufficient data'
-			f'Only empirical p-values will be returned. Pass `accept_underpowered=True (recommended)' 
-			f'to use the generalized Pareto model anyway'
-			f'You can reduce `conf` from {conf} to tolerate a higher rate of false certification'
-			f'or increase `delta` from {delta} to at least {min_delta} to tolerate greater error in certified p-values'
+			f'the generalized Pareto p estimates could not be certified due to insufficient data '
+			f'Only empirical p-values will be returned. '
+			f'Pass `accept_underpowered=True (recommended) ' 
+			f'to use the generalized Pareto model anyway '
+			f'You can reduce `conf` from {conf} to tolerate a higher rate of false certification '
+			f'or increase `delta` from {delta} to at least {min_delta} '
+			f'to tolerate greater error in certified p-values.'
 		)
-		return p_emp, certification, alpha, min_delta, u0
+		return p_emp, certification, alpha, min_delta, u0, None, None
 
 	p_u0, xi, sigma = genpareto_params(permuted_lls, u0)
 	if xi <= 0:
 		warn(
-			f"inferred an invalid generalized pareto shape parameter xi={xi}."
-			f"Only empirical p-values will be returned."
+			f"inferred an invalid generalized pareto shape parameter xi={xi}. "
+			f"Only empirical p-values will be returned." 
 		)
-		return p_emp, "rejected", None, None, None, None
+		return p_emp, "rejected", None, None, None, None, None
 
 	p_est = genpareto_p(observed_lls, p_u0, xi, sigma, u0)
 	p_composite = np.where(pd.notnull(p_est), p_est, p_emp)
 	mask = (observed_lls > u0) & (observed_lls < permuted_lls.max())
 	disagreement = np.sqrt(np.mean(np.square(np.log(p_est[mask]) - np.log(p_emp[mask]))))
-	return p_composite, certification, alpha, min_delta, u0, disagreement
+	mask = mask & (observed_lls > np.sort(observed_lls)[-50])
+	bias = np.exp(np.mean(np.log(p_est[mask]) - np.log(p_emp[mask])))
+	return p_composite, certification, alpha, min_delta, u0, disagreement, bias
 
 
 
@@ -1141,7 +1189,7 @@ every map.")
 
 
 		self.printer.print("calculating empirical significance")
-		significance = self.get_significance(
+		significance, genpareto_fit_properties = self.get_significance(
 			gene_readcount_total_bin_quantiles,
 			self.readcount_gene_totals,
 			self.distinguished_map,
@@ -1187,12 +1235,13 @@ Learning adjustment (but not guaranteed)")
 						warn(str(e) + f"\n. P-value correction for {line} failed and FDR is based on uncorrected \
 p-values for this cell line. FDRs may be optimistic or pessimistic.")
 
-
-			fdrs.append(pd.DataFrame({
-				"likelihood_fdr": multipletests(pvals, .05, method=fdr_method)[1],
-				"cell_line_name": line,
-				"gene": pvals.index
-			}))
+			for readcount_bin, subgroup in group.groupby("readcount_bin"):
+				pvals_bin = pvals[pvals.index.isin(subgroup.gene.unique())]
+				fdrs.append(pd.DataFrame({
+					"likelihood_fdr": multipletests(pvals_bin, .05, method=fdr_method)[1],
+					"cell_line_name": line,
+					"gene": pvals_bin.index
+				}))
 
 		fdrs = pd.concat(fdrs)
 
@@ -1206,7 +1255,7 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 				adjusted_pvals, on=["cell_line_name", "gene"], how="left"
 			)
 
-		return statistics
+		return statistics, genpareto_fit_properties
 
 
 	def get_readcount_gene_totals(self, retained_readcounts, condition_map, guide_gene_map):
@@ -1362,11 +1411,11 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 			permuted_likelihoods, 
 			noise_fraction=.2, 
 			test_frac=.5, 
-            delta=2, 
-            conf=.95, 
-            alpha_rank=50, 
-            accept_underpowered=True, 
-            accept_indeterminate=True,
+			delta=2, 
+			conf=.95, 
+			alpha_rank=50, 
+			accept_underpowered=True, 
+			accept_indeterminate=True,
 			min_samples_for_genpareto=300, 
 			lowest_quantile=.8, 
 			seed=None,
@@ -1387,7 +1436,9 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 
 		out = []
 		bin_assignments = []
-		fit_properties = pd.DataFrame(columns=["certification", "alpha", "min_delta", "u0", "disagreement"])
+		genpareto_fit_properties = pd.DataFrame(
+			columns=["certification", "alpha", "min_delta", "u0", "disagreement", "bias"]
+		)
 
 		for line in compared_lines:
 			if line == 'pDNA':
@@ -1406,12 +1457,13 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 					for v in permuted_likelihoods], ignore_index=True)
 				observed = distinguished_likelihood.loc[line, genes] - undistinguished_likelihood.loc[line, genes]
 
-				p, certification, alpha, min_delta, u0, disagreement = loglikelihood_p(
-					observed, null, noise_fraction, test_frac, 
-                    delta, conf, alpha_rank, accept_underpowered, accept_indeterminate,
-                    min_samples_for_genpareto, lowest_quantile, 
-                    seed
+				p, certification, alpha, min_delta, u0, disagreement, bias = loglikelihood_p(
+					observed.values, null.values, noise_fraction, test_frac, 
+					delta, conf, alpha_rank, accept_underpowered, accept_indeterminate,
+					min_samples_for_genpareto, lowest_quantile, 
+					seed
 				)
+				p = pd.Series(p, index=observed.index.copy())
 
 				out.append(pd.DataFrame({
 					"likelihood": distinguished_likelihood.loc[line, genes],
@@ -1422,6 +1474,9 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 					"cell_line_name": line,
 					"readcount_bin": bin
 				}))
+				genpareto_fit_properties.loc[f"{line}:{bin}"] = [
+					certification, alpha, min_delta, u0, disagreement, bias
+				]
 
 				for key, val in additional_annotations:
 					if isinstance(val, pd.Series):
@@ -1433,7 +1488,7 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 					out[-1][key] = val
 				out[-1].reset_index(inplace=True)
 				out[-1].rename(columns={out[-1].columns[0]: "gene"})
-		return pd.concat(out, ignore_index=True)
+		return pd.concat(out, ignore_index=True), genpareto_fit_properties
 
 
 	def __del__(self):
