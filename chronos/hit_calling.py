@@ -124,7 +124,7 @@ def genpareto_certify(log_likelihoods, p_u0, xi, sigma, u0, alpha, delta=2.0, co
 		`min_certifiable_delta` (`float` or `None`): the smallest error in p-value that can be certified with `conf` confidence
 	'''
 	assert 0 < p_u0 < 1, "p_u0 must be in (0, 1)"
-	assert 0 < xi , "xi must be positive"
+	assert 0 <= xi , "xi must be positive"
 	assert sigma > 0, "sigma must be positive"
 	assert 0 < u0, "u0 must be positive"
 	assert np.min(log_likelihoods) < u0 < np.max(log_likelihoods), \
