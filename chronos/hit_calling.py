@@ -196,7 +196,7 @@ def genpareto_p(log_likelihoods, p_u0, xi, sigma, u0):
 class IncompatibleBoundariesError(Exception):
 	pass
 
-def get_u0(log_likelihoods, noise_fraction=.2, min_samples_retain=300, lowest_quantile=.8,
+def get_u0(log_likelihoods, noise_fraction=.2, min_samples_retain=300,
 		  violation="warn"):
 	'''
 	Find a boundary for fitting the generalized Pareto distribution which is:
@@ -209,7 +209,6 @@ def get_u0(log_likelihoods, noise_fraction=.2, min_samples_retain=300, lowest_qu
 		`log_likelihoods` (1D array): the change in log-likelihood of data with increased parameters
 		`noise_fraction` (float in [0, 1]): the acceptable amount of optimizer noise to tolerate in the tail
 		`min_samples_retain` (`int` > 0): the minimum number of samples to aim for in the tail
-		`lowest_quantile` (`int`  in [0, 1]): the minimum quantile of the distribution to aim for
 		`violation` ("warn", "error", "ignore"): how to respond to cases where no u0 can be found 
 			satisfying all conditions
 		returns:
@@ -218,20 +217,17 @@ def get_u0(log_likelihoods, noise_fraction=.2, min_samples_retain=300, lowest_qu
 	optimizer_bound = get_optimizer_noise_cutoff(log_likelihoods, noise_fraction)
 	if optimizer_bound is None:
 		optimizer_bound = np.inf
-	u0_min = max(optimizer_bound, np.quantile(log_likelihoods, lowest_quantile))
-	try:
-		u0_max = np.quantile(log_likelihoods, 1-min_samples_retain/len(log_likelihoods))
-	except ValueError:
-		raise IncompatibleBoundariesError("min_samples_retain > the number of log_likelihoods")
+	u0_min = optimizer_bound
+	u0_max = np.sort(log_likelihoods)[-min_samples_retain-1]
 
 	if u0_min > u0_max:
 		message = (
-			"not enough data to meet all conditions on the boundary u0 for fitting Pareto. "
+			"not enough data to meet all conditions on the boundary u0 for fitting Pareto, "
+			"or too much optimization noise. You can allow larger noise_fraction "
+			"increase the number of training steps, or decrease regularization. "
 			f"Total samples (points): {len(log_likelihoods)}, "
 			f"Minimum bound for controlling optimizer noise below "
 			f"{noise_fraction}: {optimizer_bound:.3f}. "
-			f"Minimum bound to exclude the lowest {lowest_quantile:.4f} value: "
-			f"{np.quantile(log_likelihoods, lowest_quantile):.3f}. "
 			f"Maximum value to include at least {min_samples_retain} points for fitting: "
 			f"{u0_max:.3f}"
 		)
@@ -244,11 +240,11 @@ def get_u0(log_likelihoods, noise_fraction=.2, min_samples_retain=300, lowest_qu
 			pass
 		else:
 			raise ValueError("`violation` must be one of 'warn', 'error', 'ignore'")
-	return min(u0_min, u0_max)
+	return u0_max
 
 
 def genpareto_heldout_certification(permuted_lls, test_frac=.5, noise_fraction=.2, delta=2.0, conf=.95, 
-									alpha_rank=50, min_samples_retain=300, lowest_quantile=.8, 
+									alpha_rank=50, min_samples_retain=300,
 									seed=None):
 	'''
 	Check whether a generalized Pareto model is an acceptable method for estimating tail p-values.
@@ -268,7 +264,6 @@ def genpareto_heldout_certification(permuted_lls, test_frac=.5, noise_fraction=.
 			of getting indeterminate results. The price is less protection for the extreme tail values where 
 			the accuracy of the estimate is most important.
 		`min_samples_retain` (`int` > 0): the minimum number of samples to aim for in the tail
-		`lowest_quantile` (`int`  in [0, 1]): the minimum quantile of the distribution to aim for
 		`seed` (`int`): controls the random train/test split with numpy
 	Returns: `certification`, `alpha`, `min_certifiable_delta`
 		certification (`str`):
@@ -287,7 +282,7 @@ def genpareto_heldout_certification(permuted_lls, test_frac=.5, noise_fraction=.
 			"the generalized Pareto distribution."
 		)
 	u0 = get_u0(
-			train, noise_fraction, min_samples_retain, lowest_quantile, violation="error"
+			train, noise_fraction, min_samples_retain, violation="error"
 	)
 	if u0 is None:
 		return "rejected", None, None
@@ -302,7 +297,7 @@ def genpareto_heldout_certification(permuted_lls, test_frac=.5, noise_fraction=.
 
 def loglikelihood_p(observed_lls, permuted_lls, noise_fraction=.2, test_frac=.5, 
 					delta=2, conf=.95, alpha_rank=50, accept_underpowered=True, accept_indeterminate=True,
-					min_samples_for_genpareto=300, lowest_quantile=.8, 
+					min_samples_for_genpareto=300, 
 					seed=None
 	):
 	'''
@@ -340,7 +335,6 @@ def loglikelihood_p(observed_lls, permuted_lls, noise_fraction=.2, test_frac=.5,
 			use Pareto anyway (recommended)
 		`accept_underpowered` (`bool`): 
 			In the case that the confidence interval is too wide to certify at chosen p, use Pareto anyway (recommended)
-		`lowest_quantile` (`int`  in [0, 1]): the minimum quantile of the distribution to aim for
 		`seed` (`int`): controls the random train/test split with numpy, used for certification
 	Returns:
 		`p`, `certification`, `alpha`, `min_delta`, `u0`, `disagreement`: 
@@ -373,7 +367,7 @@ def loglikelihood_p(observed_lls, permuted_lls, noise_fraction=.2, test_frac=.5,
 		return p_emp, genpareto_fit_properties
 
 	try:
-		u0 = get_u0(permuted_lls, noise_fraction, min_samples_for_genpareto, lowest_quantile, violation="error")
+		u0 = get_u0(permuted_lls, noise_fraction, min_samples_for_genpareto, violation="error")
 	except IncompatibleBoundariesError as e:
 		warn("not enough permuted data to find a good tail for generalized Pareto. "
 			 "Only empirical p-values will be returned. Details for the tail cutoff:\n"
@@ -393,21 +387,15 @@ def loglikelihood_p(observed_lls, permuted_lls, noise_fraction=.2, test_frac=.5,
 		)
 		return p_emp, genpareto_fit_properties
 
-	# avoid rejecting certification solely because the requested quantile for u0 leaves < min_samples AFTER splitting
-	# into train/test sets	
-	lowest_quantile = min(
-		lowest_quantile,
-		1 - (1 + min_samples_for_genpareto) / np.floor(len(permuted_lls) * (1 - test_frac))
-	)
-
 	try:
 		(
 			genpareto_fit_properties["certification"], 
 			genpareto_fit_properties["alpha"], 
 			genpareto_fit_properties["delta"]
 		) = genpareto_heldout_certification(
-				permuted_lls, test_frac, noise_fraction, delta, conf, alpha_rank, min_samples_for_genpareto,
-				lowest_quantile, seed
+				permuted_lls, test_frac, noise_fraction, delta, conf, alpha_rank, 
+				min_samples_for_genpareto,
+				seed
 		)
 	except IncompatibleBoundariesError:
 		warn(
@@ -1462,7 +1450,6 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 			accept_underpowered=True, 
 			accept_indeterminate=True,
 			min_samples_for_genpareto=300, 
-			lowest_quantile=.8, 
 			seed=None,
 			additional_annotations={}
 		):
@@ -1506,7 +1493,7 @@ p-values for this cell line. FDRs may be optimistic or pessimistic.")
 				p, genpareto_fit_properties = loglikelihood_p(
 					observed.values, null.values, noise_fraction, test_frac, 
 					delta, conf, alpha_rank, accept_underpowered, accept_indeterminate,
-					min_samples_for_genpareto, lowest_quantile, 
+					min_samples_for_genpareto,  
 					seed
 				)
 
