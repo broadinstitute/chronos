@@ -447,7 +447,7 @@ def loglikelihood_p(observed_lls, permuted_lls, noise_fraction=.2, test_frac=.5,
 	) = genpareto_params(permuted_lls, u0)
 	if genpareto_fit_properties["xi"] < 0:
 		warn(
-			f"inferred an invalid generalized pareto shape parameter xi={genpareto_fit_properties["xi"]}. "
+			f"inferred an invalid generalized pareto shape parameter xi={genpareto_fit_properties['xi']}. "
 			f"Only empirical p-values will be returned." 
 		)
 		genpareto_fit_properties["certification"] = "rejected"
